@@ -70,9 +70,44 @@ def calculate_stats_for_all_months():
             final_stats[honap].append({'nev': nev, 'ora': round(orak, 2), 'fizetes': int(orak * ORADIJ)})
     return collections.OrderedDict(sorted(final_stats.items(), reverse=True))
 
+def get_currently_inside():
+    if not os.path.exists(DB_PATH):
+        return []
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    # Minden dolgozó utolsó naplóbejegyzését lekérjük
+    c.execute("""
+        SELECT n.nev, n.statusz, n.ido
+        FROM naplo n
+        INNER JOIN (
+            SELECT nev, MAX(id) AS max_id
+            FROM naplo
+            GROUP BY nev
+        ) last_logs
+        ON n.nev = last_logs.nev AND n.id = last_logs.max_id
+        ORDER BY n.nev ASC
+    """)
+
+    rows = c.fetchall()
+    conn.close()
+
+    currently_inside = []
+
+    for nev, statusz, ido in rows:
+        if statusz == "BE":
+            currently_inside.append({
+                "nev": nev,
+                "ido": ido
+            })
+
+    return currently_inside
+
 @app.route('/')
 def index():
     all_monthly_stats = calculate_stats_for_all_months()
+    currently_inside = get_currently_inside()
     current_month = datetime.now().strftime("%Y-%m")
     current_stats = all_monthly_stats.get(current_month, [])
     archive_stats = {k: v for k, v in all_monthly_stats.items() if k != current_month}
@@ -102,6 +137,25 @@ def index():
                     <div class="col-md-4"><h5>🕒 {{ sensor.ido }}</h5><small>Utolsó frissítés</small></div>
                 </div>
             </div>
+        <div class="card p-4 mb-4 shadow">
+    <h3 class="mb-3">👥 Jelenleg bent vannak</h3>
+
+    {% if currently_inside %}
+        <div class="row">
+            {% for user in currently_inside %}
+            <div class="col-md-4 mb-3">
+                <div class="card p-3 shadow-sm border-success">
+                    <h5 class="text-success mb-1">{{ user.nev }}</h5>
+                    <div><strong>✅ BENT</strong></div>
+                    <div class="text-muted small">Belépés ideje: {{ user.ido }}</div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="text-muted mb-0">Jelenleg senki nincs bent.</p>
+    {% endif %}
+</div>
             <h2 class="mb-3">Aktuális hónap elszámolása ({{ current_month }})</h2>
             <div class="row mb-5">
                 {% for user in current_stats %}
@@ -132,7 +186,14 @@ def index():
     </body>
     </html>
     """
-    return render_template_string(html_template, sensor=latest_sensor_data, current_month=current_month, current_stats=current_stats, archive_stats=archive_stats)
+    return render_template_string(
+    html_template,
+    sensor=latest_sensor_data,
+    current_month=current_month,
+    current_stats=current_stats,
+    archive_stats=archive_stats,
+    currently_inside=currently_inside
+)
 
 if __name__ == '__main__':
     init_db()
