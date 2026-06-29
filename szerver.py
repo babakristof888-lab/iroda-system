@@ -5,7 +5,7 @@ import threading
 import collections
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from flask import Flask, request, render_template_string, jsonify, Response
 
@@ -13,11 +13,16 @@ from flask import Flask, request, render_template_string, jsonify, Response
 # Konfiguráció
 # ----------------------------------------------------------------------------
 ORADIJ = 1900
-
-# Railway-en a Volume mount path legyen pontosan: /data
-# (Felülírható a DB_PATH környezeti változóval, pl. helyi teszthez.)
-DB_PATH = os.environ.get("DB_PATH", "/data/iroda.db")
 PORT = int(os.environ.get("PORT", 5000))
+
+# Ha van DATABASE_URL (Railway Postgres), azt használjuk. Ez a MEGBÍZHATÓ út.
+# Ha nincs, visszaesik SQLite-ra (helyi teszthez / vésztartaléknak).
+DATABASE_URL = os.environ.get("DATABASE_URL")
+USE_PG = bool(DATABASE_URL)
+DB_PATH = os.environ.get("DB_PATH", "/data/iroda.db")
+
+# Paraméter-helyőrző: Postgres -> %s, SQLite -> ?
+PH = "%s" if USE_PG else "?"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,14 +30,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("iroda")
 
+if USE_PG:
+    import psycopg2  # pip: psycopg2-binary
+
 app = Flask(__name__)
 
 # ----------------------------------------------------------------------------
 # Élő szenzoradat (csak memóriában, szálbiztosan)
 # ----------------------------------------------------------------------------
-# Ez NEM kerül adatbázisba, csak az utolsó mérést tartja memóriában.
-# Szerver-újraindításkor visszaáll "--"-ra, amíg új mérés nem érkezik.
-# A waitress több szálon szolgál ki, ezért lock védi az írást/olvasást.
 _sensor_lock = threading.Lock()
 latest_sensor_data = {
     "temp": "--",
@@ -42,54 +47,86 @@ latest_sensor_data = {
 
 
 # ----------------------------------------------------------------------------
-# Adatbázis – robusztus SQLite kapcsolat
+# Adatbázis-réteg (Postgres VAGY SQLite, ugyanazzal a felülettel)
 # ----------------------------------------------------------------------------
 @contextmanager
-def get_db():
+def get_conn():
     """
-    SQLite kapcsolat WAL módban, hosszú busy_timeout-tal.
-    Így a párhuzamos olvasás/írás nem dob "database is locked" hibát,
-    és minden kapcsolat garantáltan lezárul.
+    Egy adatbázis-kapcsolat, garantált lezárással.
+
+    Postgres:
+      - connect_timeout=10  -> nem lóg be örökre kapcsolódáskor
+      - statement_timeout=15s -> egyetlen lekérdezés sem akadhat be véglegesen
+    SQLite:
+      - WAL + busy_timeout (vésztartalék mód)
     """
-    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    if USE_PG:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    else:
+        os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
+        cur = conn.cursor()
+        if USE_PG:
+            cur.execute("SET statement_timeout = 15000")
+        else:
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.execute("PRAGMA synchronous=NORMAL")
+        cur.close()
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def init_db():
-    """Létrehozza a táblát és az indexeket, ha még nincsenek."""
     try:
-        with get_db() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS naplo (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    nev TEXT NOT NULL,
-                    statusz TEXT NOT NULL,
-                    ido TEXT NOT NULL
+        with get_conn() as conn:
+            cur = conn.cursor()
+            if USE_PG:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS naplo (
+                        id SERIAL PRIMARY KEY,
+                        nev TEXT NOT NULL,
+                        statusz TEXT NOT NULL,
+                        ido TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_naplo_nev ON naplo(nev);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_naplo_ido ON naplo(ido);")
-        log.info("Adatbázis kész: %s", DB_PATH)
+            else:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS naplo (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        nev TEXT NOT NULL,
+                        statusz TEXT NOT NULL,
+                        ido TEXT NOT NULL
+                    )
+                    """
+                )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_naplo_nev ON naplo(nev)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_naplo_ido ON naplo(ido)")
+            cur.close()
+        log.info(
+            "Adatbázis kész: %s",
+            "PostgreSQL (DATABASE_URL)" if USE_PG else f"SQLite ({DB_PATH})",
+        )
     except Exception as e:
-        # Ne álljon le az import emiatt – az endpointok külön kezelik a hibát.
         log.exception("Nem sikerült inicializálni az adatbázist: %s", e)
 
 
 # Fontos: az init az import során fut, nem csak a __main__ blokkban.
-# Így akkor is működik, ha a szervert nem 'python app.py'-vel indítják.
 init_db()
 
 
@@ -97,16 +134,7 @@ init_db()
 # Rugalmas kérés-feldolgozás (hardver-kompatibilitás)
 # ----------------------------------------------------------------------------
 def parse_payload():
-    """
-    Visszaadja a kérés adatait dict-ként, akárhogy is küldte a hardver:
-    - application/json
-    - application/x-www-form-urlencoded (HTML form / sok Arduino-kliens)
-    - query string (?temp=..&hum=..)
-
-    Az ESP/Arduino kliensek gyakran NEM állítják be a
-    'Content-Type: application/json' fejlécet, ezért a sima get_json()
-    None-t adna vissza és 400-as hibát kapnál. Ez a függvény ezt megoldja.
-    """
+    """JSON / form / query string / nyers JSON – bármit elfogad a hardvertől."""
     data = request.get_json(silent=True)
     if isinstance(data, dict) and data:
         return data
@@ -119,7 +147,6 @@ def parse_payload():
     if merged:
         return merged
 
-    # Végső eset: nyers body kézi JSON-ként
     raw = request.get_data(as_text=True)
     if raw:
         import json
@@ -133,7 +160,6 @@ def parse_payload():
 
 
 def pick(d, *keys):
-    """Több lehetséges kulcsnév közül az elsőt adja vissza, ami létezik."""
     for k in keys:
         if k in d and d[k] not in (None, ""):
             return d[k]
@@ -167,7 +193,6 @@ def telemetry():
 
 @app.route("/latest", methods=["GET"])
 def latest():
-    """A böngésző pár másodpercenként ezt kéri le az élő kijelzéshez."""
     with _sensor_lock:
         data = dict(latest_sensor_data)
     resp = jsonify(data)
@@ -177,8 +202,11 @@ def latest():
 
 @app.route("/log", methods=["POST"])
 def log_entry():
-    """Belépés/kilépés naplózása. Csak ez kerül adatbázisba."""
+    """Belépés/kilépés naplózása – ez kerül adatbázisba."""
     adat = parse_payload()
+    # Minden beérkező kérést naplózunk, hogy diagnosztizálható legyen.
+    log.info("Log kérés érkezett: %r", adat)
+
     nev = pick(adat, "nev", "name", "user")
     statusz = pick(adat, "statusz", "status", "state")
 
@@ -196,33 +224,36 @@ def log_entry():
 
     ido = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Rövid újrapróbálkozás zárolás esetére (a WAL mellett szinte sosem kell).
+    last_err = None
     for attempt in range(3):
         try:
-            with get_db() as conn:
-                conn.execute(
-                    "INSERT INTO naplo (nev, statusz, ido) VALUES (?, ?, ?)",
+            with get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    f"INSERT INTO naplo (nev, statusz, ido) VALUES ({PH}, {PH}, {PH})",
                     (nev, statusz, ido),
                 )
-            log.info("Naplo: %s %s @ %s", nev, statusz, ido)
+                cur.close()
+            log.info("Naplo MENTVE: %s %s @ %s", nev, statusz, ido)
             return jsonify({"status": "ok"}), 200
-        except sqlite3.OperationalError as e:
-            log.warning("DB írás újrapróbálás (%d): %s", attempt + 1, e)
-            time.sleep(0.3)
         except Exception as e:
-            log.exception("DB írási hiba: %s", e)
-            return jsonify({"status": "error", "message": "Adatbázis hiba"}), 500
+            last_err = e
+            log.warning("DB írás újrapróbálás (%d): %s", attempt + 1, e)
+            time.sleep(0.4)
 
-    return jsonify({"status": "error", "message": "Adatbázis foglalt"}), 503
+    log.error("DB írás VÉGLEG sikertelen: %s", last_err)
+    return jsonify({"status": "error", "message": "Adatbázis hiba"}), 503
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Egyszerű állapot-ellenőrzés (Railway healthcheck-hez is jó)."""
     try:
-        with get_db() as conn:
-            conn.execute("SELECT 1")
-        return jsonify({"status": "ok", "db": "ok"}), 200
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            cur.close()
+        return jsonify({"status": "ok", "db": "ok", "backend": "pg" if USE_PG else "sqlite"}), 200
     except Exception as e:
         log.exception("Healthcheck DB hiba: %s", e)
         return jsonify({"status": "error", "db": "fail"}), 500
@@ -230,24 +261,58 @@ def health():
 
 @app.route("/favicon.ico")
 def favicon():
-    # Csendes 204, hogy ne legyen tele a log 404-gyel.
     return Response(status=204)
+
+
+# ----------------------------------------------------------------------------
+# Adatlekérés
+# ----------------------------------------------------------------------------
+def fetch_all_logs():
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT nev, statusz, ido FROM naplo ORDER BY nev ASC, ido ASC, id ASC")
+            rows = cur.fetchall()
+            cur.close()
+        return rows
+    except Exception as e:
+        log.exception("Napló olvasási hiba: %s", e)
+        return []
+
+
+def fetch_last_per_user():
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT n.nev, n.statusz, n.ido
+                FROM naplo n
+                INNER JOIN (
+                    SELECT nev, MAX(id) AS max_id
+                    FROM naplo
+                    GROUP BY nev
+                ) last_logs
+                  ON n.nev = last_logs.nev AND n.id = last_logs.max_id
+                ORDER BY n.nev ASC
+                """
+            )
+            rows = cur.fetchall()
+            cur.close()
+        return rows
+    except Exception as e:
+        log.exception("Utolsó események olvasási hiba: %s", e)
+        return []
 
 
 # ----------------------------------------------------------------------------
 # Munkaidő-számítás – automatikus kiléptetés éjfélkor
 # ----------------------------------------------------------------------------
 def _end_of_day(dt):
-    """Az adott nap 23:59:59 időpontja."""
     return dt.replace(hour=23, minute=59, second=59, microsecond=0)
 
 
 def _add_session(monthly_data, nev, start, end):
-    """
-    Egy lezárt munkamenetet ([start, end]) hozzáad az elszámoláshoz.
-    Az automatikus éjféli kiléptetés miatt egy munkamenet egy napon belül van,
-    de a hónapkulcsot a start alapján képezzük.
-    """
     if end <= start:
         return
     honap_kulcs = start.strftime("%Y-%m")
@@ -255,33 +320,14 @@ def _add_session(monthly_data, nev, start, end):
 
 
 def calculate_stats_for_all_months():
-    """
-    Végigmegy a naplón felhasználónként, és összeszámolja a ledolgozott időt.
-
-    Szabályok (automatikus éjféli kiléptetés):
-    - Egy BE-hez tartozó KI ugyanazon a napon: normál lezárás.
-    - Ha valaki BE után nem küld aznap KI-t (átnyúlik a következő napra,
-      vagy egyáltalán nincs KI): a munkamenet automatikusan lezárul aznap
-      23:59:59-kor. Így senki nem marad napokig "bent", és az óra beszámít.
-    - A ma még nyitva lévő munkamenet a jelenlegi időpontig számít be.
-    """
-    if not os.path.exists(DB_PATH):
+    rows = fetch_all_logs()
+    if not rows:
         return collections.OrderedDict()
 
-    try:
-        with get_db() as conn:
-            rows = conn.execute(
-                "SELECT nev, statusz, ido FROM naplo ORDER BY nev ASC, ido ASC, id ASC"
-            ).fetchall()
-    except Exception as e:
-        log.exception("Statisztika olvasási hiba: %s", e)
-        return collections.OrderedDict()
-
-    # Felhasználónként csoportosított, időrendezett események.
     events_by_user = collections.defaultdict(list)
     for nev, statusz, ido_str in rows:
         try:
-            ido = datetime.strptime(ido_str, "%Y-%m-%d %H:%M:%S")
+            ido = datetime.strptime(str(ido_str), "%Y-%m-%d %H:%M:%S")
         except (ValueError, TypeError):
             continue
         events_by_user[nev].append((ido, str(statusz).upper()))
@@ -293,34 +339,29 @@ def calculate_stats_for_all_months():
     today = now.date()
 
     for nev, events in events_by_user.items():
-        open_in = None  # nyitott BE időpontja
+        open_in = None
         for ido, statusz in events:
             if statusz == "BE":
                 if open_in is not None:
-                    # Volt már nyitott BE KI nélkül.
                     if open_in.date() < ido.date():
-                        # Másik napról maradt nyitva -> éjféli auto-kiléptetés.
                         _add_session(monthly_data, nev, open_in, _end_of_day(open_in))
                         open_in = ido
-                    # Ha ugyanaznap dupla BE: az elsőt tartjuk meg, a duplikátumot eldobjuk.
+                    # ugyanaznap dupla BE -> az elsőt tartjuk meg
                 else:
                     open_in = ido
             elif statusz == "KI":
                 if open_in is None:
-                    continue  # árva KI -> figyelmen kívül
+                    continue
                 if open_in.date() == ido.date():
                     _add_session(monthly_data, nev, open_in, ido)
                     open_in = None
                 else:
-                    # A KI másik napon van -> az eredeti napot éjfélkor zárjuk,
-                    # a kései KI-t eldobjuk.
                     _add_session(monthly_data, nev, open_in, _end_of_day(open_in))
                     open_in = None
 
-        # A ciklus után még nyitva lévő munkamenet kezelése.
         if open_in is not None:
             if open_in.date() == today:
-                _add_session(monthly_data, nev, open_in, now)  # ma még bent van
+                _add_session(monthly_data, nev, open_in, now)
             else:
                 _add_session(monthly_data, nev, open_in, _end_of_day(open_in))
 
@@ -340,33 +381,7 @@ def calculate_stats_for_all_months():
 
 
 def get_currently_inside():
-    """
-    Most bent lévők: akinek a legutolsó eseménye BE ÉS az a mai napon történt.
-    A korábbi napról nyitva maradt BE-ket az auto-kiléptetés lezárja,
-    ezért azok már nem jelennek meg "bent" állapotban.
-    """
-    if not os.path.exists(DB_PATH):
-        return []
-
-    try:
-        with get_db() as conn:
-            rows = conn.execute(
-                """
-                SELECT n.nev, n.statusz, n.ido
-                FROM naplo n
-                INNER JOIN (
-                    SELECT nev, MAX(id) AS max_id
-                    FROM naplo
-                    GROUP BY nev
-                ) last_logs
-                  ON n.nev = last_logs.nev AND n.id = last_logs.max_id
-                ORDER BY n.nev ASC
-                """
-            ).fetchall()
-    except Exception as e:
-        log.exception("Bent lévők olvasási hiba: %s", e)
-        return []
-
+    rows = fetch_last_per_user()
     today_str = datetime.now().strftime("%Y-%m-%d")
     currently_inside = []
     for nev, statusz, ido in rows:
@@ -400,6 +415,7 @@ HTML_TEMPLATE = """
         .salary { font-weight: bold; color: #198754; font-size: 1.2rem; }
         .month-card { background: white; border-radius: 12px; }
         .sensor-note { font-size: 0.9rem; opacity: 0.85; }
+        #stale { display:none; font-weight:bold; }
     </style>
 </head>
 <body>
@@ -419,6 +435,7 @@ HTML_TEMPLATE = """
                     <small>Utolsó frissítés</small>
                 </div>
             </div>
+            <div class="mt-2"><span id="stale" class="badge bg-warning text-dark">⚠ Nincs friss szenzoradat – az eszköz épp nem küld</span></div>
             <div class="mt-3 sensor-note">
                 A hőmérséklet és páratartalom csak élő kijelzés.
                 Nem kerül adatbázisba, mindig csak az utolsó mérés van memóriában.
@@ -462,7 +479,6 @@ HTML_TEMPLATE = """
                 <div class="col-12">
                     <div class="alert alert-info shadow-sm">
                         Ebben a hónapban még nincs elszámolt munkaidő.
-                        A korábbi hónapokat lent, az archívumban találod.
                     </div>
                 </div>
             {% endif %}
@@ -494,6 +510,8 @@ HTML_TEMPLATE = """
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        let lastIdo = null;
+        let lastChange = Date.now();
         async function frissitSensor() {
             try {
                 const response = await fetch("/latest", { cache: "no-store" });
@@ -502,6 +520,10 @@ HTML_TEMPLATE = """
                 document.getElementById("temp").innerText = "🌡️ " + data.temp + "°C";
                 document.getElementById("hum").innerText = "💧 " + data.hum + "%";
                 document.getElementById("ido").innerText = "🕒 " + data.ido;
+                if (data.ido !== lastIdo) { lastIdo = data.ido; lastChange = Date.now(); }
+                // Ha 90 mp-nél régebbi az utolsó változás, jelezzük, hogy nincs friss adat.
+                const stale = (Date.now() - lastChange) > 90000;
+                document.getElementById("stale").style.display = stale ? "inline-block" : "none";
             } catch (error) {
                 console.log("Szenzor frissítési hiba:", error);
             }
@@ -536,14 +558,15 @@ def index():
 
 
 # ----------------------------------------------------------------------------
-# Indítás – éles (production) szerverrel, NEM a Flask fejlesztői szerverrel
+# Indítás – éles szerver (waitress)
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
     log.info("Iroda szerver indul a %d porton (waitress)...", PORT)
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=PORT, threads=8)
+        # channel_timeout: egy beragadt kliens (pl. rossz wifis ESP) max ennyi
+        # másodpercig foghat egy szálat, utána a szerver elengedi -> nincs befagyás.
+        serve(app, host="0.0.0.0", port=PORT, threads=8, channel_timeout=30)
     except ImportError:
-        # Ha valamiért nincs waitress telepítve, essen vissza a beépített szerverre.
-        log.warning("waitress nem található, fejlesztői szerver indul (nem ajánlott élesben).")
+        log.warning("waitress nem található, fejlesztői szerver indul.")
         app.run(host="0.0.0.0", port=PORT, threaded=True)
