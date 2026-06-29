@@ -1,6 +1,5 @@
 import os
 import time
-import queue
 import logging
 import threading
 import collections
@@ -16,13 +15,12 @@ from flask import Flask, request, render_template_string, jsonify, Response
 ORADIJ = 1900
 PORT = int(os.environ.get("PORT", 5000))
 
-# A naplót SQLite-ban tároljuk a /data volume-on. EZ AZ ALAP, nem kell hozzá
-# semmilyen Railway-változó. (Ha valaha mégis adsz DATABASE_URL-t egy VALÓDI
-# Postgreshez, automatikusan azt használja – de üres értéket figyelmen kívül hagy.)
+# A naplót SQLite-ban tároljuk a /data volume-on. Nem kell hozzá semmilyen
+# Railway-változó. (Ha valaha adsz VALÓDI DATABASE_URL-t, azt használja; üreset
+# figyelmen kívül hagy.)
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_PG = bool(DATABASE_URL)
 DB_PATH = os.environ.get("DB_PATH", "/data/iroda.db")
-
 PH = "%s" if USE_PG else "?"
 
 logging.basicConfig(
@@ -36,15 +34,23 @@ if USE_PG:
 
 app = Flask(__name__)
 
-# ----------------------------------------------------------------------------
 # Élő szenzoradat (csak memóriában, szálbiztosan)
-# ----------------------------------------------------------------------------
 _sensor_lock = threading.Lock()
 latest_sensor_data = {"temp": "--", "hum": "--", "ido": "Nincs adat"}
 
 
 # ----------------------------------------------------------------------------
-# Adatbázis-kapcsolat
+# Minden beérkező kérés naplózása (így LÁTOD, eléri-e az ESP a szervert)
+# ----------------------------------------------------------------------------
+@app.before_request
+def _log_request():
+    # A gyakori /latest és favicon kéréseket kihagyjuk, hogy ne spammelje a logot.
+    if request.path not in ("/latest", "/favicon.ico"):
+        log.info("REQ %s %s  (ip=%s)", request.method, request.path, request.remote_addr)
+
+
+# ----------------------------------------------------------------------------
+# Adatbázis
 # ----------------------------------------------------------------------------
 @contextmanager
 def get_conn():
@@ -105,50 +111,7 @@ init_db()
 
 
 # ----------------------------------------------------------------------------
-# HÁTTÉR-ÍRÓ: az írás soha nem a webkérés szálán történik
-# ----------------------------------------------------------------------------
-# A /log csak beteszi a bejegyzést ebbe a sorba és azonnal visszatér.
-# Egyetlen dedikált háttérszál végzi a tényleges INSERT-et. Emiatt:
-#  - egyetlen webkérés sem akadhat be a lemezíráson -> a szerver NEM fagy le,
-#  - az írások egy szálon, sorban mennek -> nincs "database is locked".
-_write_q = queue.Queue()
-
-
-def _writer_loop():
-    while True:
-        try:
-            nev, statusz, ido = _write_q.get()
-        except Exception:
-            continue
-        try:
-            ok = False
-            for attempt in range(5):
-                try:
-                    with get_conn() as conn:
-                        cur = conn.cursor()
-                        cur.execute(
-                            f"INSERT INTO naplo (nev, statusz, ido) VALUES ({PH}, {PH}, {PH})",
-                            (nev, statusz, ido),
-                        )
-                        cur.close()
-                    log.info("Naplo MENTVE: %s %s @ %s", nev, statusz, ido)
-                    ok = True
-                    break
-                except Exception as e:
-                    log.warning("Író újrapróba (%d): %s", attempt + 1, e)
-                    time.sleep(1)
-            if not ok:
-                log.error("Író: VÉGLEG nem sikerült menteni: %s %s @ %s", nev, statusz, ido)
-        finally:
-            _write_q.task_done()
-
-
-_writer_thread = threading.Thread(target=_writer_loop, name="db-writer", daemon=True)
-_writer_thread.start()
-
-
-# ----------------------------------------------------------------------------
-# Rugalmas kérés-feldolgozás (hardver-kompatibilitás)
+# Rugalmas kérés-feldolgozás
 # ----------------------------------------------------------------------------
 def parse_payload():
     data = request.get_json(silent=True)
@@ -181,9 +144,9 @@ def pick(d, *keys):
 
 
 # ----------------------------------------------------------------------------
-# Endpointok
+# Endpointok  (GET is engedélyezett, hogy böngészőből is tudd tesztelni)
 # ----------------------------------------------------------------------------
-@app.route("/telemetry", methods=["POST"])
+@app.route("/telemetry", methods=["POST", "GET"])
 def telemetry():
     global latest_sensor_data
     adat = parse_payload()
@@ -196,7 +159,7 @@ def telemetry():
         latest_sensor_data = {
             "temp": temp, "hum": hum, "ido": datetime.now().strftime("%H:%M:%S")
         }
-    log.info("Telemetry: temp=%s hum=%s", temp, hum)
+    log.info("Telemetry OK: temp=%s hum=%s", temp, hum)
     return jsonify({"status": "ok"}), 200
 
 
@@ -209,10 +172,9 @@ def latest():
     return resp
 
 
-@app.route("/log", methods=["POST"])
+@app.route("/log", methods=["POST", "GET"])
 def log_entry():
     adat = parse_payload()
-    log.info("Log kérés érkezett: %r", adat)
     nev = pick(adat, "nev", "name", "user")
     statusz = pick(adat, "statusz", "status", "state")
     if nev is None or statusz is None:
@@ -226,11 +188,25 @@ def log_entry():
         return jsonify({"status": "error", "message": "A statusz csak BE vagy KI lehet"}), 400
 
     ido = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Sorba tesszük és AZONNAL visszatérünk – nem várunk a lemezírásra.
-    _write_q.put((nev, statusz, ido))
-    _invalidate_cache()
-    log.info("Log sorba téve: %s %s @ %s", nev, statusz, ido)
-    return jsonify({"status": "ok"}), 200
+    last_err = None
+    for attempt in range(4):
+        try:
+            with get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    f"INSERT INTO naplo (nev, statusz, ido) VALUES ({PH}, {PH}, {PH})",
+                    (nev, statusz, ido),
+                )
+                cur.close()
+            _invalidate_cache()
+            log.info("Naplo MENTVE: %s %s @ %s", nev, statusz, ido)
+            return jsonify({"status": "ok"}), 200
+        except Exception as e:
+            last_err = e
+            log.warning("DB írás újrapróba (%d): %s", attempt + 1, e)
+            time.sleep(0.5)
+    log.error("DB írás VÉGLEG sikertelen: %s", last_err)
+    return jsonify({"status": "error", "message": "Adatbázis hiba"}), 503
 
 
 @app.route("/health", methods=["GET"])
@@ -241,7 +217,7 @@ def health():
             cur.execute("SELECT 1")
             cur.fetchone()
             cur.close()
-        return jsonify({"status": "ok", "db": "ok", "queue": _write_q.qsize()}), 200
+        return jsonify({"status": "ok", "db": "ok"}), 200
     except Exception as e:
         log.exception("Healthcheck hiba: %s", e)
         return jsonify({"status": "error", "db": "fail"}), 500
@@ -525,7 +501,9 @@ if __name__ == "__main__":
     log.info("Iroda szerver indul a %d porton (waitress)...", PORT)
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=PORT, threads=8, channel_timeout=30)
+        # threads=16: bőven van szál; channel_timeout=30: a beragadt (pl. rossz
+        # wifis ESP) kapcsolatot a szerver 30s után elengedi -> nincs befagyás.
+        serve(app, host="0.0.0.0", port=PORT, threads=16, channel_timeout=30)
     except ImportError:
         log.warning("waitress nem található, fejlesztői szerver indul.")
         app.run(host="0.0.0.0", port=PORT, threaded=True)
