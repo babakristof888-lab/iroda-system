@@ -1,5 +1,6 @@
 import os
 import time
+import queue
 import logging
 import threading
 import collections
@@ -15,13 +16,13 @@ from flask import Flask, request, render_template_string, jsonify, Response
 ORADIJ = 1900
 PORT = int(os.environ.get("PORT", 5000))
 
-# Ha van DATABASE_URL (Railway Postgres), azt használjuk. Ez a MEGBÍZHATÓ út.
-# Ha nincs, visszaesik SQLite-ra (helyi teszthez / vésztartaléknak).
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# A naplót SQLite-ban tároljuk a /data volume-on. EZ AZ ALAP, nem kell hozzá
+# semmilyen Railway-változó. (Ha valaha mégis adsz DATABASE_URL-t egy VALÓDI
+# Postgreshez, automatikusan azt használja – de üres értéket figyelmen kívül hagy.)
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_PG = bool(DATABASE_URL)
 DB_PATH = os.environ.get("DB_PATH", "/data/iroda.db")
 
-# Paraméter-helyőrző: Postgres -> %s, SQLite -> ?
 PH = "%s" if USE_PG else "?"
 
 logging.basicConfig(
@@ -31,7 +32,7 @@ logging.basicConfig(
 log = logging.getLogger("iroda")
 
 if USE_PG:
-    import psycopg2  # pip: psycopg2-binary
+    import psycopg2
 
 app = Flask(__name__)
 
@@ -39,27 +40,14 @@ app = Flask(__name__)
 # Élő szenzoradat (csak memóriában, szálbiztosan)
 # ----------------------------------------------------------------------------
 _sensor_lock = threading.Lock()
-latest_sensor_data = {
-    "temp": "--",
-    "hum": "--",
-    "ido": "Nincs adat",
-}
+latest_sensor_data = {"temp": "--", "hum": "--", "ido": "Nincs adat"}
 
 
 # ----------------------------------------------------------------------------
-# Adatbázis-réteg (Postgres VAGY SQLite, ugyanazzal a felülettel)
+# Adatbázis-kapcsolat
 # ----------------------------------------------------------------------------
 @contextmanager
 def get_conn():
-    """
-    Egy adatbázis-kapcsolat, garantált lezárással.
-
-    Postgres:
-      - connect_timeout=10  -> nem lóg be örökre kapcsolódáskor
-      - statement_timeout=15s -> egyetlen lekérdezés sem akadhat be véglegesen
-    SQLite:
-      - WAL + busy_timeout (vésztartalék mód)
-    """
     if USE_PG:
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
     else:
@@ -95,50 +83,77 @@ def init_db():
             cur = conn.cursor()
             if USE_PG:
                 cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS naplo (
+                    """CREATE TABLE IF NOT EXISTS naplo (
                         id SERIAL PRIMARY KEY,
-                        nev TEXT NOT NULL,
-                        statusz TEXT NOT NULL,
-                        ido TEXT NOT NULL
-                    )
-                    """
+                        nev TEXT NOT NULL, statusz TEXT NOT NULL, ido TEXT NOT NULL)"""
                 )
             else:
                 cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS naplo (
+                    """CREATE TABLE IF NOT EXISTS naplo (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        nev TEXT NOT NULL,
-                        statusz TEXT NOT NULL,
-                        ido TEXT NOT NULL
-                    )
-                    """
+                        nev TEXT NOT NULL, statusz TEXT NOT NULL, ido TEXT NOT NULL)"""
                 )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_naplo_nev ON naplo(nev)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_naplo_ido ON naplo(ido)")
             cur.close()
-        log.info(
-            "Adatbázis kész: %s",
-            "PostgreSQL (DATABASE_URL)" if USE_PG else f"SQLite ({DB_PATH})",
-        )
+        log.info("Adatbázis kész: %s", "PostgreSQL" if USE_PG else f"SQLite ({DB_PATH})")
     except Exception as e:
-        log.exception("Nem sikerült inicializálni az adatbázist: %s", e)
+        log.exception("init_db hiba: %s", e)
 
 
-# Fontos: az init az import során fut, nem csak a __main__ blokkban.
 init_db()
+
+
+# ----------------------------------------------------------------------------
+# HÁTTÉR-ÍRÓ: az írás soha nem a webkérés szálán történik
+# ----------------------------------------------------------------------------
+# A /log csak beteszi a bejegyzést ebbe a sorba és azonnal visszatér.
+# Egyetlen dedikált háttérszál végzi a tényleges INSERT-et. Emiatt:
+#  - egyetlen webkérés sem akadhat be a lemezíráson -> a szerver NEM fagy le,
+#  - az írások egy szálon, sorban mennek -> nincs "database is locked".
+_write_q = queue.Queue()
+
+
+def _writer_loop():
+    while True:
+        try:
+            nev, statusz, ido = _write_q.get()
+        except Exception:
+            continue
+        try:
+            ok = False
+            for attempt in range(5):
+                try:
+                    with get_conn() as conn:
+                        cur = conn.cursor()
+                        cur.execute(
+                            f"INSERT INTO naplo (nev, statusz, ido) VALUES ({PH}, {PH}, {PH})",
+                            (nev, statusz, ido),
+                        )
+                        cur.close()
+                    log.info("Naplo MENTVE: %s %s @ %s", nev, statusz, ido)
+                    ok = True
+                    break
+                except Exception as e:
+                    log.warning("Író újrapróba (%d): %s", attempt + 1, e)
+                    time.sleep(1)
+            if not ok:
+                log.error("Író: VÉGLEG nem sikerült menteni: %s %s @ %s", nev, statusz, ido)
+        finally:
+            _write_q.task_done()
+
+
+_writer_thread = threading.Thread(target=_writer_loop, name="db-writer", daemon=True)
+_writer_thread.start()
 
 
 # ----------------------------------------------------------------------------
 # Rugalmas kérés-feldolgozás (hardver-kompatibilitás)
 # ----------------------------------------------------------------------------
 def parse_payload():
-    """JSON / form / query string / nyers JSON – bármit elfogad a hardvertől."""
     data = request.get_json(silent=True)
     if isinstance(data, dict) and data:
         return data
-
     merged = {}
     if request.form:
         merged.update(request.form.to_dict())
@@ -146,7 +161,6 @@ def parse_payload():
         merged.update(request.args.to_dict())
     if merged:
         return merged
-
     raw = request.get_data(as_text=True)
     if raw:
         import json
@@ -171,21 +185,16 @@ def pick(d, *keys):
 # ----------------------------------------------------------------------------
 @app.route("/telemetry", methods=["POST"])
 def telemetry():
-    """Élő hőmérséklet/páratartalom. Nem mentjük adatbázisba."""
     global latest_sensor_data
     adat = parse_payload()
     temp = pick(adat, "temp", "temperature", "hom", "homerseklet")
     hum = pick(adat, "hum", "humidity", "para", "paratartalom")
-
     if temp is None or hum is None:
         log.warning("Telemetry hiányos adat: %r", adat)
         return jsonify({"status": "error", "message": "Hiányzó temp vagy hum adat"}), 400
-
     with _sensor_lock:
         latest_sensor_data = {
-            "temp": temp,
-            "hum": hum,
-            "ido": datetime.now().strftime("%H:%M:%S"),
+            "temp": temp, "hum": hum, "ido": datetime.now().strftime("%H:%M:%S")
         }
     log.info("Telemetry: temp=%s hum=%s", temp, hum)
     return jsonify({"status": "ok"}), 200
@@ -202,47 +211,26 @@ def latest():
 
 @app.route("/log", methods=["POST"])
 def log_entry():
-    """Belépés/kilépés naplózása – ez kerül adatbázisba."""
     adat = parse_payload()
-    # Minden beérkező kérést naplózunk, hogy diagnosztizálható legyen.
     log.info("Log kérés érkezett: %r", adat)
-
     nev = pick(adat, "nev", "name", "user")
     statusz = pick(adat, "statusz", "status", "state")
-
     if nev is None or statusz is None:
         log.warning("Log hiányos adat: %r", adat)
         return jsonify({"status": "error", "message": "Hiányzó nev vagy statusz adat"}), 400
-
     nev = str(nev).strip()
     statusz = str(statusz).strip().upper()
-
     if not nev:
         return jsonify({"status": "error", "message": "Üres név"}), 400
     if statusz not in ("BE", "KI"):
         return jsonify({"status": "error", "message": "A statusz csak BE vagy KI lehet"}), 400
 
     ido = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    last_err = None
-    for attempt in range(3):
-        try:
-            with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    f"INSERT INTO naplo (nev, statusz, ido) VALUES ({PH}, {PH}, {PH})",
-                    (nev, statusz, ido),
-                )
-                cur.close()
-            log.info("Naplo MENTVE: %s %s @ %s", nev, statusz, ido)
-            return jsonify({"status": "ok"}), 200
-        except Exception as e:
-            last_err = e
-            log.warning("DB írás újrapróbálás (%d): %s", attempt + 1, e)
-            time.sleep(0.4)
-
-    log.error("DB írás VÉGLEG sikertelen: %s", last_err)
-    return jsonify({"status": "error", "message": "Adatbázis hiba"}), 503
+    # Sorba tesszük és AZONNAL visszatérünk – nem várunk a lemezírásra.
+    _write_q.put((nev, statusz, ido))
+    _invalidate_cache()
+    log.info("Log sorba téve: %s %s @ %s", nev, statusz, ido)
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route("/health", methods=["GET"])
@@ -253,9 +241,9 @@ def health():
             cur.execute("SELECT 1")
             cur.fetchone()
             cur.close()
-        return jsonify({"status": "ok", "db": "ok", "backend": "pg" if USE_PG else "sqlite"}), 200
+        return jsonify({"status": "ok", "db": "ok", "queue": _write_q.qsize()}), 200
     except Exception as e:
-        log.exception("Healthcheck DB hiba: %s", e)
+        log.exception("Healthcheck hiba: %s", e)
         return jsonify({"status": "error", "db": "fail"}), 500
 
 
@@ -285,17 +273,10 @@ def fetch_last_per_user():
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute(
-                """
-                SELECT n.nev, n.statusz, n.ido
-                FROM naplo n
-                INNER JOIN (
-                    SELECT nev, MAX(id) AS max_id
-                    FROM naplo
-                    GROUP BY nev
-                ) last_logs
-                  ON n.nev = last_logs.nev AND n.id = last_logs.max_id
-                ORDER BY n.nev ASC
-                """
+                """SELECT n.nev, n.statusz, n.ido FROM naplo n
+                   INNER JOIN (SELECT nev, MAX(id) AS max_id FROM naplo GROUP BY nev) last_logs
+                     ON n.nev = last_logs.nev AND n.id = last_logs.max_id
+                   ORDER BY n.nev ASC"""
             )
             rows = cur.fetchall()
             cur.close()
@@ -315,8 +296,7 @@ def _end_of_day(dt):
 def _add_session(monthly_data, nev, start, end):
     if end <= start:
         return
-    honap_kulcs = start.strftime("%Y-%m")
-    monthly_data[honap_kulcs][nev]["seconds"] += (end - start).total_seconds()
+    monthly_data[start.strftime("%Y-%m")][nev]["seconds"] += (end - start).total_seconds()
 
 
 def calculate_stats_for_all_months():
@@ -346,7 +326,6 @@ def calculate_stats_for_all_months():
                     if open_in.date() < ido.date():
                         _add_session(monthly_data, nev, open_in, _end_of_day(open_in))
                         open_in = ido
-                    # ugyanaznap dupla BE -> az elsőt tartjuk meg
                 else:
                     open_in = ido
             elif statusz == "KI":
@@ -358,7 +337,6 @@ def calculate_stats_for_all_months():
                 else:
                     _add_session(monthly_data, nev, open_in, _end_of_day(open_in))
                     open_in = None
-
         if open_in is not None:
             if open_in.date() == today:
                 _add_session(monthly_data, nev, open_in, now)
@@ -371,23 +349,43 @@ def calculate_stats_for_all_months():
         for nev, adat in nevek.items():
             orak = adat["seconds"] / 3600
             final_stats[honap].append({
-                "nev": nev,
-                "ora": round(orak, 2),
-                "fizetes": int(orak * ORADIJ),
+                "nev": nev, "ora": round(orak, 2), "fizetes": int(orak * ORADIJ)
             })
         final_stats[honap].sort(key=lambda x: x["nev"])
-
     return collections.OrderedDict(sorted(final_stats.items(), reverse=True))
 
 
 def get_currently_inside():
     rows = fetch_last_per_user()
     today_str = datetime.now().strftime("%Y-%m-%d")
-    currently_inside = []
+    inside = []
     for nev, statusz, ido in rows:
         if str(statusz).upper() == "BE" and str(ido).startswith(today_str):
-            currently_inside.append({"nev": nev, "ido": ido})
-    return currently_inside
+            inside.append({"nev": nev, "ido": ido})
+    return inside
+
+
+# ----------------------------------------------------------------------------
+# Dashboard adat gyorsítótár (max 5 mp-enként éri el a DB-t)
+# ----------------------------------------------------------------------------
+_cache_lock = threading.Lock()
+_cache = {"ts": 0.0, "stats": None, "inside": None}
+
+
+def _invalidate_cache():
+    with _cache_lock:
+        _cache["ts"] = 0.0
+
+
+def get_dashboard_data():
+    with _cache_lock:
+        if _cache["stats"] is not None and (time.time() - _cache["ts"]) < 5:
+            return _cache["stats"], _cache["inside"]
+    stats = calculate_stats_for_all_months()
+    inside = get_currently_inside()
+    with _cache_lock:
+        _cache.update(ts=time.time(), stats=stats, inside=inside)
+    return stats, inside
 
 
 # ----------------------------------------------------------------------------
@@ -403,43 +401,25 @@ HTML_TEMPLATE = """
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { background-color: #f0f2f5; }
-        .live-card {
-            background: linear-gradient(135deg, #007bff, #00d4ff);
-            color: white; border-radius: 15px;
-        }
-        .stat-card {
-            background: white; border-radius: 12px;
-            border-left: 5px solid #28a745; transition: 0.3s;
-        }
+        .live-card { background: linear-gradient(135deg, #007bff, #00d4ff); color: white; border-radius: 15px; }
+        .stat-card { background: white; border-radius: 12px; border-left: 5px solid #28a745; transition: 0.3s; }
         .stat-card:hover { transform: translateY(-5px); }
         .salary { font-weight: bold; color: #198754; font-size: 1.2rem; }
         .month-card { background: white; border-radius: 12px; }
         .sensor-note { font-size: 0.9rem; opacity: 0.85; }
-        #stale { display:none; font-weight:bold; }
+        #stale { display:none; }
     </style>
 </head>
 <body>
     <div class="container py-4">
         <div class="card live-card p-4 mb-4 shadow text-center">
             <div class="row align-items-center">
-                <div class="col-md-4">
-                    <h4 id="temp">🌡️ {{ sensor.temp }}°C</h4>
-                    <small>Hőmérséklet élőben</small>
-                </div>
-                <div class="col-md-4">
-                    <h4 id="hum">💧 {{ sensor.hum }}%</h4>
-                    <small>Páratartalom élőben</small>
-                </div>
-                <div class="col-md-4">
-                    <h5 id="ido">🕒 {{ sensor.ido }}</h5>
-                    <small>Utolsó frissítés</small>
-                </div>
+                <div class="col-md-4"><h4 id="temp">🌡️ {{ sensor.temp }}°C</h4><small>Hőmérséklet élőben</small></div>
+                <div class="col-md-4"><h4 id="hum">💧 {{ sensor.hum }}%</h4><small>Páratartalom élőben</small></div>
+                <div class="col-md-4"><h5 id="ido">🕒 {{ sensor.ido }}</h5><small>Utolsó frissítés</small></div>
             </div>
             <div class="mt-2"><span id="stale" class="badge bg-warning text-dark">⚠ Nincs friss szenzoradat – az eszköz épp nem küld</span></div>
-            <div class="mt-3 sensor-note">
-                A hőmérséklet és páratartalom csak élő kijelzés.
-                Nem kerül adatbázisba, mindig csak az utolsó mérés van memóriában.
-            </div>
+            <div class="mt-3 sensor-note">A hőmérséklet és páratartalom csak élő kijelzés. Nem kerül adatbázisba, mindig csak az utolsó mérés van memóriában.</div>
         </div>
 
         <div class="card p-4 mb-4 shadow">
@@ -468,19 +448,13 @@ HTML_TEMPLATE = """
                 <div class="col-md-4 mb-3">
                     <div class="card p-3 stat-card shadow-sm">
                         <h5>{{ user.nev }}</h5>
-                        <p class="mb-1 text-muted">
-                            Ledolgozott: <strong>{{ user.ora }} óra</strong>
-                        </p>
+                        <p class="mb-1 text-muted">Ledolgozott: <strong>{{ user.ora }} óra</strong></p>
                         <div class="salary">{{ "{:,}".format(user.fizetes) }} Ft</div>
                     </div>
                 </div>
                 {% endfor %}
             {% else %}
-                <div class="col-12">
-                    <div class="alert alert-info shadow-sm">
-                        Ebben a hónapban még nincs elszámolt munkaidő.
-                    </div>
-                </div>
+                <div class="col-12"><div class="alert alert-info shadow-sm">Ebben a hónapban még nincs elszámolt munkaidő.</div></div>
             {% endif %}
         </div>
 
@@ -501,32 +475,25 @@ HTML_TEMPLATE = """
                 </div>
                 {% endfor %}
             {% else %}
-                <div class="alert alert-secondary shadow-sm">
-                    Még nincs korábbi havi archív adat.
-                </div>
+                <div class="alert alert-secondary shadow-sm">Még nincs korábbi havi archív adat.</div>
             {% endif %}
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        let lastIdo = null;
-        let lastChange = Date.now();
+        let lastIdo = null, lastChange = Date.now();
         async function frissitSensor() {
             try {
-                const response = await fetch("/latest", { cache: "no-store" });
-                if (!response.ok) return;
-                const data = await response.json();
-                document.getElementById("temp").innerText = "🌡️ " + data.temp + "°C";
-                document.getElementById("hum").innerText = "💧 " + data.hum + "%";
-                document.getElementById("ido").innerText = "🕒 " + data.ido;
-                if (data.ido !== lastIdo) { lastIdo = data.ido; lastChange = Date.now(); }
-                // Ha 90 mp-nél régebbi az utolsó változás, jelezzük, hogy nincs friss adat.
-                const stale = (Date.now() - lastChange) > 90000;
-                document.getElementById("stale").style.display = stale ? "inline-block" : "none";
-            } catch (error) {
-                console.log("Szenzor frissítési hiba:", error);
-            }
+                const r = await fetch("/latest", { cache: "no-store" });
+                if (!r.ok) return;
+                const d = await r.json();
+                document.getElementById("temp").innerText = "🌡️ " + d.temp + "°C";
+                document.getElementById("hum").innerText = "💧 " + d.hum + "%";
+                document.getElementById("ido").innerText = "🕒 " + d.ido;
+                if (d.ido !== lastIdo) { lastIdo = d.ido; lastChange = Date.now(); }
+                document.getElementById("stale").style.display = (Date.now() - lastChange) > 90000 ? "inline-block" : "none";
+            } catch (e) { console.log("Szenzor hiba:", e); }
         }
         frissitSensor();
         setInterval(frissitSensor, 5000);
@@ -538,22 +505,16 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def index():
-    all_monthly_stats = calculate_stats_for_all_months()
-    currently_inside = get_currently_inside()
+    all_monthly_stats, currently_inside = get_dashboard_data()
     current_month = datetime.now().strftime("%Y-%m")
     current_stats = all_monthly_stats.get(current_month, [])
     archive_stats = {k: v for k, v in all_monthly_stats.items() if k != current_month}
-
     with _sensor_lock:
         sensor = dict(latest_sensor_data)
-
     return render_template_string(
         HTML_TEMPLATE,
-        sensor=sensor,
-        current_month=current_month,
-        current_stats=current_stats,
-        archive_stats=archive_stats,
-        currently_inside=currently_inside,
+        sensor=sensor, current_month=current_month, current_stats=current_stats,
+        archive_stats=archive_stats, currently_inside=currently_inside,
     )
 
 
@@ -564,8 +525,6 @@ if __name__ == "__main__":
     log.info("Iroda szerver indul a %d porton (waitress)...", PORT)
     try:
         from waitress import serve
-        # channel_timeout: egy beragadt kliens (pl. rossz wifis ESP) max ennyi
-        # másodpercig foghat egy szálat, utána a szerver elengedi -> nincs befagyás.
         serve(app, host="0.0.0.0", port=PORT, threads=8, channel_timeout=30)
     except ImportError:
         log.warning("waitress nem található, fejlesztői szerver indul.")
