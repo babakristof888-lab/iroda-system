@@ -215,6 +215,11 @@ if ($service) {
 & $nssm set $ServiceName AppStderr        (Join-Path $LogDir "err.log") | Out-Null
 & $nssm set $ServiceName Start            SERVICE_AUTO_START | Out-Null
 & $nssm set $ServiceName AppRestartDelay  5000               | Out-Null
+
+# Leállításkor Ctrl+C-t küld, és ad 8 másodpercet a tiszta zárásra (soros port,
+# adatbázis). Enélkül az NSSM 1,5 másodperc után erőszakosan lő.
+& $nssm set $ServiceName AppStopMethodSkip    0    | Out-Null
+& $nssm set $ServiceName AppStopMethodConsole 8000 | Out-Null
 & $nssm set $ServiceName DisplayName      "Iroda RFID gateway" | Out-Null
 & $nssm set $ServiceName Description      "RFID bélyegzések és környezeti mérések továbbítása a szerverre." | Out-Null
 

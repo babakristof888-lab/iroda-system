@@ -41,7 +41,10 @@ log = logging.getLogger("gateway.main")
 
 SUPERVISOR_TICK_SECONDS = 1.0
 RESTART_DELAY_SECONDS = 5.0
-SHUTDOWN_JOIN_SECONDS = 10.0
+# Az NSSM alapból nem vár sokáig a leállásra. Minden írás azonnal commitolva
+# van, így egy erőszakos kilövés sem veszít adatot – de adjunk esélyt a
+# szálaknak, hogy maguktól, tisztán zárjanak.
+SHUTDOWN_JOIN_SECONDS = 5.0
 
 
 def _log_startup(cfg: Config) -> None:

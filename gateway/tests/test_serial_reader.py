@@ -171,3 +171,41 @@ def test_foglalt_port_uzenete_magyarul_mondja_meg_mit_kell_tenni():
     message = serial_reader.busy_port_message("COM5", PermissionError("access denied"))
     assert "A COM5 port foglalt." in message
     assert "Arduino IDE Serial Monitor" in message
+
+
+# --------------------------------------------------------------------------
+# Portnyitási hibák: a teendő mindegyiknél más
+# --------------------------------------------------------------------------
+def test_foglalt_port_felismerese_permissionerrorbol():
+    assert serial_reader.classify_open_error(PermissionError(13, "Access is denied")) == \
+        serial_reader.OPEN_BUSY
+
+
+def test_foglalt_port_felismerese_a_serialexception_szovegebol():
+    """Windowson a pyserial az eredeti hibát szövegként hordozza, és a
+    PermissionError szó magyar Windowson sem fordítódik le."""
+    import serial as pyserial
+
+    error = pyserial.SerialException(
+        "could not open port 'COM5': PermissionError(13, 'A hozzáférés megtagadva.', None, 5)"
+    )
+    assert serial_reader.classify_open_error(error) == serial_reader.OPEN_BUSY
+    assert "A COM5 port foglalt." in serial_reader.open_failure_message("COM5", error)
+
+
+def test_eltunt_eszkoz_felismerese():
+    import serial as pyserial
+
+    error = pyserial.SerialException(
+        "could not open port 'COM5': FileNotFoundError(2, 'A megadott fájl nem található.', None, 2)"
+    )
+    assert serial_reader.classify_open_error(error) == serial_reader.OPEN_MISSING
+    uzenet = serial_reader.open_failure_message("COM5", error)
+    assert "nem létezik" in uzenet
+    assert "SERIAL_PORT" in uzenet
+
+
+def test_ismeretlen_hiba_eseten_is_van_ertheto_uzenet():
+    error = OSError("valami egészen más")
+    assert serial_reader.classify_open_error(error) == serial_reader.OPEN_UNKNOWN
+    assert "COM5" in serial_reader.open_failure_message("COM5", error)

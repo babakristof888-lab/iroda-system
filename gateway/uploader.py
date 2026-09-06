@@ -369,6 +369,8 @@ def run(cfg: Config, status: Status, stop: threading.Event) -> None:
 
         next_upload = 0.0
         next_heartbeat = 0.0
+        # A karbantartás naponta egyszer esedékes; percenként megnézni bőven elég.
+        next_maintenance_check = 0.0
 
         while not stop.is_set():
             now = time.time()
@@ -394,8 +396,10 @@ def run(cfg: Config, status: Status, stop: threading.Event) -> None:
                 uploader.heartbeat()
                 next_heartbeat = time.time() + HEARTBEAT_INTERVAL_SECONDS
 
-            if uploader.maintenance_due(now):
-                uploader.maintenance(now)
+            if now >= next_maintenance_check:
+                if uploader.maintenance_due(now):
+                    uploader.maintenance(now)
+                next_maintenance_check = time.time() + 60.0
 
             stop.wait(TICK_SECONDS)
     finally:

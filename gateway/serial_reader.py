@@ -16,6 +16,7 @@ Windows-specifikumok, amik a gyakorlatban számítanak:
 
 from __future__ import annotations
 
+import errno
 import logging
 import sqlite3
 import threading
@@ -95,10 +96,62 @@ def resolve_port(cfg: Config) -> str | None:
 # --------------------------------------------------------------------------
 # Portnyitás
 # --------------------------------------------------------------------------
+# A portnyitás háromféleképpen bukhat el, és a teendő mindháromnál más.
+OPEN_BUSY = "busy"        # más program tartja nyitva
+OPEN_MISSING = "missing"  # nincs ilyen eszköz (kihúzták, vagy más a COM szám)
+OPEN_UNKNOWN = "unknown"
+
+
+def classify_open_error(error: BaseException) -> str:
+    """Miért nem nyílt meg a port.
+
+    A `serial.SerialException` a Windows eredeti hibáját szövegként hordozza
+    (`PermissionError(13, ...)` / `FileNotFoundError(2, ...)`). Ezek a nevek nem
+    fordítódnak le magyar Windowson sem, ezért rájuk lehet szűrni.
+    """
+    if isinstance(error, PermissionError):
+        return OPEN_BUSY
+    if isinstance(error, FileNotFoundError):
+        return OPEN_MISSING
+
+    code = getattr(error, "errno", None)
+    if code == errno.EACCES:
+        return OPEN_BUSY
+    if code in (errno.ENOENT, errno.ENODEV, errno.ENXIO):
+        return OPEN_MISSING
+
+    text = str(error).lower()
+    if "permissionerror" in text or "access is denied" in text or "errno 13" in text:
+        return OPEN_BUSY
+    if "filenotfounderror" in text or "no such file" in text or "errno 2" in text:
+        return OPEN_MISSING
+    return OPEN_UNKNOWN
+
+
 def busy_port_message(port: str, error: BaseException) -> str:
     return (
         f"A {port} port foglalt. Zárd be az Arduino IDE Serial Monitorát, vagy más "
         f"programot, ami használja. ({error})"
+    )
+
+
+def missing_port_message(port: str, error: BaseException) -> str:
+    return (
+        f"A {port} port nem létezik. Nincs bedugva az USB kábel, vagy megváltozott a "
+        f"COM-port száma. Nézd meg az Eszközkezelőben (Portok, COM és LPT), és ha más "
+        f"a szám, írd át a .env fájlban a SERIAL_PORT sort. ({error})"
+    )
+
+
+def open_failure_message(port: str, error: BaseException) -> str:
+    kind = classify_open_error(error)
+    if kind == OPEN_BUSY:
+        return busy_port_message(port, error)
+    if kind == OPEN_MISSING:
+        return missing_port_message(port, error)
+    return (
+        f"A {port} port nem nyitható meg. Vagy más program tartja nyitva (Arduino IDE "
+        f"Serial Monitor), vagy nincs bedugva az eszköz. ({error})"
     )
 
 
@@ -274,8 +327,15 @@ class SerialReader:
                     self.port = open_port(self.cfg, port_name)
                 except (PermissionError, serial.SerialException, OSError) as exc:
                     self.status.set_serial_ok(False)
-                    log.error(busy_port_message(port_name, exc))
-                    self.stop.wait(SERIAL_BUSY_RETRY_SECONDS)
+                    kind = classify_open_error(exc)
+                    if kind == OPEN_MISSING:
+                        # Az eszköz eltűnt (kihúzás, vagy a Windows lekapcsolta a
+                        # hubot): sűrűbben nézzük, hogy visszajött-e.
+                        log.warning(open_failure_message(port_name, exc))
+                        self.stop.wait(SERIAL_REOPEN_SECONDS)
+                    else:
+                        log.error(open_failure_message(port_name, exc))
+                        self.stop.wait(SERIAL_BUSY_RETRY_SECONDS)
                     continue
 
                 log.info("A %s port megnyitva, %d baud.", port_name, self.cfg.baud_rate)
