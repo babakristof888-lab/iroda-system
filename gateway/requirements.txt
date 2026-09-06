@@ -1,0 +1,9 @@
+# Az RFID gateway függőségei. Szándékosan három csomag: a puffer az SQLite,
+# ami a Python beépített sqlite3 moduljával megy, ORM és async keretrendszer
+# nélkül.
+pyserial==3.5
+requests==2.32.3
+python-dotenv==1.0.1
+
+# Csak a tesztekhez. A szolgáltatás futásához nem kell.
+pytest==8.3.4
