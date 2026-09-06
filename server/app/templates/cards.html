@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Kártyák{% endblock %}
+
+{% block content %}
+<h3 class="mb-3">Kártyák</h3>
+
+{% if unknown %}
+<div class="card p-3 shadow-sm mb-4 border-warning">
+  <h5 class="text-warning-emphasis">🪪 Ismeretlen kártyák ({{ unknown|length }})</h5>
+  <p class="small text-muted">
+    Ezekhez az UID-okhoz még nem tartozik dolgozó. A bélyegzések megmaradtak – hozzárendelés
+    után visszamenőleg feldolgozódnak.
+  </p>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead><tr><th>UID</th><th>Bélyegzés</th><th>Utoljára</th><th style="min-width: 320px;">Hozzárendelés</th></tr></thead>
+      <tbody>
+        {% for item in unknown %}
+        <tr>
+          <td class="font-monospace">{{ item.uid }}</td>
+          <td>{{ item.count }} db</td>
+          <td class="small">{{ item.last_seen|dt }}</td>
+          <td>
+            <form method="post" action="/cards/assign" class="d-flex gap-2">
+              <input type="hidden" name="uid" value="{{ item.uid }}">
+              <select class="form-select form-select-sm" name="employee_id" required>
+                <option value="">– válassz dolgozót –</option>
+                {% for employee in employees %}
+                <option value="{{ employee.id }}">{{ employee.name }} ({{ employee.employee_code }})</option>
+                {% endfor %}
+              </select>
+              <button class="btn btn-sm btn-warning text-nowrap" type="submit">Hozzárendel</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card p-3 shadow-sm mb-4">
+  <h6 class="text-muted">Kártya felvétele vagy átrendelése</h6>
+  <form method="post" action="/cards/assign" class="row g-2 align-items-end">
+    <div class="col-md-3">
+      <label class="form-label small">UID</label>
+      <input class="form-control" name="uid" placeholder="04A1B2C3" required>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label small">Dolgozó</label>
+      <select class="form-select" name="employee_id">
+        <option value="">– nincs (hozzárendelés törlése) –</option>
+        {% for employee in employees %}
+        <option value="{{ employee.id }}">{{ employee.name }} ({{ employee.employee_code }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label small">Megjegyzés</label>
+      <input class="form-control" name="note">
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-primary w-100" type="submit">Mentés</button>
+    </div>
+  </form>
+</div>
+
+<div class="card p-3 shadow-sm">
+  <h5 class="mb-3">Nyilvántartott kártyák</h5>
+  <div class="table-responsive">
+    <table class="table align-middle">
+      <thead><tr><th>UID</th><th>Dolgozó</th><th>Hozzárendelve</th><th>Megjegyzés</th><th>Állapot</th><th class="text-end">Művelet</th></tr></thead>
+      <tbody>
+        {% for card, employee in cards %}
+        <tr {% if not card.active %}class="table-secondary"{% endif %}>
+          <td class="font-monospace">{{ card.uid }}</td>
+          <td>{% if employee %}{{ employee.name }}{% else %}<span class="text-muted">nincs</span>{% endif %}</td>
+          <td class="small">{{ card.assigned_at|dt }}</td>
+          <td class="small text-muted">{{ card.note or "" }}</td>
+          <td>
+            {% if card.active %}<span class="badge bg-success">aktív</span>
+            {% else %}<span class="badge bg-secondary">letiltva</span>{% endif %}
+          </td>
+          <td class="text-end">
+            <form method="post" action="/cards/{{ card.id }}/toggle" class="d-inline">
+              <button class="btn btn-sm btn-outline-secondary" type="submit">
+                {{ "Letiltás" if card.active else "Engedélyezés" }}
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-muted">Még nincs nyilvántartott kártya.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small text-muted mb-0">
+    Letiltott kártyával a bélyegzés megmarad, de ismeretlenként kerül be – így egy elvesztett
+    kártya használata látszik a naplóban.
+  </p>
+</div>
+{% endblock %}

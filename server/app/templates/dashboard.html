@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Áttekintés{% endblock %}
+
+{% block content %}
+<div class="card live-card p-4 mb-4 shadow">
+  <div class="row align-items-center text-center">
+    <div class="col-md-4">
+      <div class="big-number" id="temp">
+        {% if latest_env and latest_env.temp_avg is not none %}{{ "%.1f"|format(latest_env.temp_avg) }}°C{% else %}--{% endif %}
+      </div>
+      <div class="small">Hőmérséklet</div>
+      {% if latest_env %}
+        <div class="small opacity-75">
+          min {{ "%.1f"|format(latest_env.temp_min) if latest_env.temp_min is not none else "--" }} ·
+          max {{ "%.1f"|format(latest_env.temp_max) if latest_env.temp_max is not none else "--" }}
+        </div>
+      {% endif %}
+    </div>
+    <div class="col-md-4">
+      <div class="big-number" id="hum">
+        {% if latest_env and latest_env.hum_avg is not none %}{{ "%.1f"|format(latest_env.hum_avg) }}%{% else %}--{% endif %}
+      </div>
+      <div class="small">Páratartalom</div>
+      {% if latest_env %}
+        <div class="small opacity-75">
+          min {{ "%.1f"|format(latest_env.hum_min) if latest_env.hum_min is not none else "--" }} ·
+          max {{ "%.1f"|format(latest_env.hum_max) if latest_env.hum_max is not none else "--" }}
+        </div>
+      {% endif %}
+    </div>
+    <div class="col-md-4">
+      {% if latest_env %}
+        <div class="fw-semibold">{{ latest_env.period_end_utc|dt("%m-%d %H:%M") }}</div>
+        <div class="small">utolsó összesített óra</div>
+        {% if env_age_minutes is not none and env_age_minutes > 90 %}
+          <span class="badge bg-warning text-dark mt-2">⚠ {{ env_age_minutes }} perce nincs új mérés</span>
+        {% endif %}
+        {% if latest_env.press_avg is not none %}
+          <div class="small opacity-75 mt-1">{{ "%.0f"|format(latest_env.press_avg) }} hPa</div>
+        {% endif %}
+      {% else %}
+        <div class="small">Még nem érkezett környezeti mérés.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if env_alerts %}
+  {% for alert in env_alerts %}
+    <div class="alert alert-warning py-2">⚠ {{ alert }}</div>
+  {% endfor %}
+{% endif %}
+
+<div class="row">
+  <div class="col-lg-7 mb-4">
+    <div class="card p-3 shadow-sm h-100">
+      <h5 class="mb-3">👥 Jelenleg bent ({{ inside|length }})</h5>
+      {% if inside %}
+        <div class="row g-2">
+          {% for person in inside %}
+          <div class="col-md-6">
+            <div class="border rounded p-2 border-success">
+              <div class="fw-semibold text-success">{{ person.name }}</div>
+              <div class="small text-muted">
+                Belépés: {{ person.started_at|time }} · {{ person.seconds|hours }} eltelt
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="text-muted mb-0">Jelenleg senki nincs bent.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="col-lg-5 mb-4">
+    <div class="card p-3 shadow-sm h-100">
+      <h5 class="mb-3">📡 Gateway státusz</h5>
+      {% if gateways %}
+        {% for gw in gateways %}
+        <div class="d-flex justify-content-between align-items-start border-bottom py-2">
+          <div>
+            <span class="badge {% if gw.online %}bg-success{% else %}bg-danger{% endif %}">
+              {{ "online" if gw.online else "offline" }}
+            </span>
+            <strong class="ms-1">{{ gw.gateway_id }}</strong>
+            <div class="small text-muted">
+              {% if gw.last_seen_at %}
+                {{ gw.minutes_ago }} perce jelentkezett · {{ gw.last_seen_at|dt("%m-%d %H:%M:%S") }}
+              {% else %}
+                még nem jelentkezett
+              {% endif %}
+            </div>
+          </div>
+          <div class="text-end small text-muted">
+            {% if gw.version %}v{{ gw.version }}<br>{% endif %}
+            {% if gw.last_queue_size %}<span class="text-warning-emphasis">puffer: {{ gw.last_queue_size }}</span><br>{% endif %}
+            {% if gw.serial_ok is not none %}soros: {{ "✅" if gw.serial_ok else "❌" }}{% endif %}
+            {% if gw.bme_ok is not none %} · BME: {{ "✅" if gw.bme_ok else "❌" }}{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="text-muted mb-0">Még egy gateway sem jelentkezett be.</p>
+      {% endif %}
+
+      {% if unknown_count %}
+        <a class="btn btn-outline-warning btn-sm mt-3" href="/cards">
+          🪪 {{ unknown_count }} ismeretlen kártya vár hozzárendelésre
+        </a>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card p-3 shadow-sm mb-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">📈 Elmúlt 24 óra</h5>
+    <a class="btn btn-sm btn-outline-secondary" href="/environment">Részletek</a>
+  </div>
+  <div class="chart-box"><canvas id="envChart" data-hours="24"></canvas></div>
+  <div class="small text-muted mt-2" id="envChartEmpty" hidden>Még nincs elég mérés a grafikonhoz.</div>
+</div>
+
+<div class="card p-3 shadow-sm">
+  <h5 class="mb-3">🕒 Mai bélyegzések – {{ today.isoformat() }}</h5>
+  {% if today_punches %}
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead><tr><th>Idő</th><th>Dolgozó</th><th>Kártya</th><th>Irány</th><th>Megjegyzés</th></tr></thead>
+      <tbody>
+        {% for punch, employee in today_punches %}
+        <tr {% if punch.note and 'debounced' in punch.note %}class="table-secondary"{% endif %}>
+          <td class="font-monospace">{{ punch.ts_utc|time }}</td>
+          <td>{% if employee %}{{ employee.name }}{% else %}<span class="text-danger">ismeretlen kártya</span>{% endif %}</td>
+          <td class="font-monospace small">{{ punch.card_uid }}</td>
+          <td>
+            {% if punch.direction == 'IN' %}<span class="badge bg-success">Belépés</span>
+            {% elif punch.direction == 'OUT' %}<span class="badge bg-secondary">Kilépés</span>
+            {% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          <td class="small text-muted">{{ punch.note or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <p class="text-muted mb-0">Ma még nem érkezett bélyegzés.</p>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="/static/app.js"></script>
+{% endblock %}
