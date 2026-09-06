@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Riportok{% endblock %}
+
+{% block content %}
+<h3 class="mb-3">Riportok</h3>
+
+<div class="card p-3 shadow-sm mb-4">
+  <form method="get" action="/reports" class="row g-2 align-items-end">
+    <div class="col-md-4">
+      <label class="form-label small" for="f-emp">Dolgozó</label>
+      <select class="form-select" id="f-emp" name="employee_id">
+        <option value="">– mindenki –</option>
+        {% for employee in employees %}
+        <option value="{{ employee.id }}" {% if selected_employee == employee.id %}selected{% endif %}>
+          {{ employee.name }}{% if not employee.active %} (inaktív){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label small" for="f-from">Ettől</label>
+      <input class="form-control" type="date" id="f-from" name="from" value="{{ date_from }}">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label small" for="f-to">Eddig</label>
+      <input class="form-control" type="date" id="f-to" name="to" value="{{ date_to }}">
+    </div>
+    <div class="col-md-2 d-grid gap-2">
+      <button class="btn btn-primary" type="submit">Szűrés</button>
+    </div>
+  </form>
+  <a class="btn btn-outline-success btn-sm mt-3 align-self-start"
+     href="/reports/export?from={{ date_from }}&to={{ date_to }}&employee_id={{ selected_employee or '' }}">
+    ⬇ CSV export (Excel-barát)
+  </a>
+</div>
+
+<div class="alert alert-info d-flex justify-content-between align-items-center">
+  <span>Összesen a szűrt időszakban:</span>
+  <strong class="fs-5">{{ total_seconds|hours }}</strong>
+</div>
+
+<div class="card p-3 shadow-sm mb-4">
+  <h5 class="mb-3">Napi bontás</h5>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr><th>Dátum</th><th>Dolgozó</th><th>Munkamenetek</th><th class="text-end">Ledolgozott</th></tr>
+      </thead>
+      <tbody>
+        {% for day in days %}
+        <tr {% if day.has_auto_closed %}class="auto-closed"{% endif %}>
+          <td class="text-nowrap">{{ day.local_date.isoformat() }}</td>
+          <td>{{ day.employee_name }}</td>
+          <td class="small">
+            {% for row in day.rows %}
+              <span class="badge {% if row.auto_closed %}bg-warning text-dark{% elif row.is_open %}bg-info text-dark{% else %}bg-light text-dark border{% endif %} me-1">
+                {{ row.started_at|time }} –
+                {% if row.ended_at %}{{ row.ended_at|time }}{% else %}folyamatban{% endif %}
+                {% if row.auto_closed %} ⚠ automatikus zárás{% endif %}
+              </span>
+            {% endfor %}
+          </td>
+          <td class="text-end fw-semibold">{{ day.seconds|hours }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="text-muted">Nincs adat a megadott szűrőkkel.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small text-muted mt-3 mb-0">
+    A <span class="badge bg-warning text-dark">sárga</span> sorok automatikusan lezárt
+    munkameneteket tartalmaznak – valaki elfelejtett kijelentkezni, ezek kézi ellenőrzést
+    igényelnek. A <span class="badge bg-info text-dark">kék</span> munkamenet még nyitva van,
+    az ideje az eddig eltelt idő.
+  </p>
+</div>
+
+<div class="card p-3 shadow-sm">
+  <h5 class="mb-3">Havi összesítés</h5>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Hónap</th><th>Dolgozó</th><th class="text-end">Ledolgozott</th>
+          <th class="text-end">Óra</th>
+          {% if show_pay %}<th class="text-end">Becsült bér</th>{% endif %}
+          <th class="text-end">Automatikus zárás</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for month in months %}
+        <tr {% if month.auto_closed_count %}class="auto-closed"{% endif %}>
+          <td>{{ month.month }}</td>
+          <td>{{ month.employee_name }}</td>
+          <td class="text-end">{{ month.seconds|hours }}</td>
+          <td class="text-end font-monospace">{{ "%.2f"|format(month.hours) }}</td>
+          {% if show_pay %}<td class="text-end">{{ "{:,}".format(month.pay).replace(",", " ") }} Ft</td>{% endif %}
+          <td class="text-end">{{ month.auto_closed_count or "" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="{{ 6 if show_pay else 5 }}" class="text-muted">Nincs adat.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if show_pay %}
+  <p class="small text-muted mt-3 mb-0">
+    A becsült bér tájékoztató jellegű, {{ settings.hourly_rate }} Ft/óra alapon
+    (<code>HOURLY_RATE</code>). Kikapcsolható a változó 0-ra állításával.
+  </p>
+  {% endif %}
+</div>
+{% endblock %}

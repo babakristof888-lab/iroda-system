@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Iroda{% endblock %} · Munkaidő-nyilvántartó</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/style.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="/">🏢 Iroda</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainnav">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="mainnav">
+      <ul class="navbar-nav me-auto">
+        {% set nav = [('/', 'Áttekintés'), ('/employees', 'Dolgozók'), ('/cards', 'Kártyák'),
+                      ('/reports', 'Riportok'), ('/environment', 'Környezet'), ('/punches', 'Eseménynapló')] %}
+        {% for href, label in nav %}
+        <li class="nav-item">
+          <a class="nav-link {% if request.url.path == href %}active fw-semibold{% endif %}" href="{{ href }}">{{ label }}</a>
+        </li>
+        {% endfor %}
+      </ul>
+      <form method="post" action="/logout" class="d-flex">
+        <button class="btn btn-outline-light btn-sm" type="submit">Kilépés</button>
+      </form>
+    </div>
+  </div>
+</nav>
+
+<div class="container pb-5">
+  {% if message %}<div class="alert alert-success">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+  {% block content %}{% endblock %}
+
+  <footer class="text-muted small mt-5 pt-3 border-top">
+    Szerveridő: {{ now|dt }} ({{ settings.tz_name }}) ·
+    Napzárás: {{ settings.auto_close_label }} ·
+    Debounce: {{ settings.debounce_seconds }} mp
+  </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

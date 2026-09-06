@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Környezet{% endblock %}
+
+{% block content %}
+<h3 class="mb-3">Környezeti adatok</h3>
+
+{% for alert in alerts %}
+  <div class="alert alert-warning py-2">⚠ {{ alert }}</div>
+{% endfor %}
+
+<div class="card p-3 shadow-sm mb-4">
+  <form method="get" action="/environment" class="row g-2 align-items-end">
+    <div class="col-md-4">
+      <label class="form-label small" for="f-hours">Időtartam</label>
+      <select class="form-select" id="f-hours" name="hours" onchange="this.form.submit()">
+        {% for value, label in ranges.items() %}
+        <option value="{{ value }}" {% if hours == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label small" for="f-sensor">Szenzor</label>
+      <select class="form-select" id="f-sensor" name="sensor_id" onchange="this.form.submit()">
+        {% for sensor in sensors %}
+        <option value="{{ sensor }}" {% if sensor_id == sensor %}selected{% endif %}>{{ sensor }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-4">
+      <a class="btn btn-outline-success w-100"
+         href="/environment/export?hours={{ hours }}&sensor_id={{ sensor_id }}">⬇ CSV export</a>
+    </div>
+  </form>
+</div>
+
+<div class="card p-3 shadow-sm mb-4">
+  <div class="chart-box chart-box-tall"><canvas id="envChart" data-hours="{{ hours }}" data-sensor="{{ sensor_id }}"></canvas></div>
+  <div class="small text-muted mt-2" id="envChartEmpty" hidden>Nincs megjeleníthető mérés ebben az időszakban.</div>
+</div>
+
+<div class="card p-3 shadow-sm">
+  <h5 class="mb-3">Óránkénti összesítők ({{ readings|length }} sor)</h5>
+  <div class="table-responsive">
+    <table class="table table-sm table-striped align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Időszak</th><th class="text-end">Minta</th>
+          <th class="text-end">Hőm. átlag</th><th class="text-end">min</th><th class="text-end">max</th>
+          <th class="text-end">Pára átlag</th><th class="text-end">min</th><th class="text-end">max</th>
+          <th class="text-end">Légnyomás</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% macro num(value, unit="") %}{% if value is none %}—{% else %}{{ "%.1f"|format(value) }}{{ unit }}{% endif %}{% endmacro %}
+        {% for row in readings %}
+        <tr>
+          <td class="text-nowrap small">{{ row.period_start_utc|dt("%m-%d %H:%M") }} – {{ row.period_end_utc|dt("%H:%M") }}</td>
+          <td class="text-end">{{ row.sample_count }}</td>
+          <td class="text-end fw-semibold">{{ num(row.temp_avg, " °C") }}</td>
+          <td class="text-end text-muted">{{ num(row.temp_min) }}</td>
+          <td class="text-end text-muted">{{ num(row.temp_max) }}</td>
+          <td class="text-end fw-semibold">{{ num(row.hum_avg, " %") }}</td>
+          <td class="text-end text-muted">{{ num(row.hum_min) }}</td>
+          <td class="text-end text-muted">{{ num(row.hum_max) }}</td>
+          <td class="text-end">{{ num(row.press_avg, " hPa") }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="text-muted">Nincs mérés ebben az időszakban.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="/static/app.js"></script>
+{% endblock %}

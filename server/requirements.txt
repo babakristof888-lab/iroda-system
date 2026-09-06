@@ -1,0 +1,12 @@
+# Csak a szerver függőségei. A gateway (pyserial stb.) NEM tartozik ide.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+SQLAlchemy==2.0.36
+Jinja2==3.1.5
+python-multipart==0.0.20
+itsdangerous==2.2.0
+bcrypt==4.2.1
+
+# Tesztekhez (a Railway build is telepíti, elhanyagolható méret)
+pytest==8.3.4
+httpx==0.28.1

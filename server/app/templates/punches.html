@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Eseménynapló{% endblock %}
+
+{% block content %}
+<h3 class="mb-3">Nyers eseménynapló</h3>
+
+<div class="card p-3 shadow-sm mb-4">
+  <form method="get" action="/punches" class="row g-2 align-items-end">
+    <div class="col-md-3">
+      <label class="form-label small" for="f-emp">Dolgozó</label>
+      <select class="form-select" id="f-emp" name="employee_id">
+        <option value="">– mindenki –</option>
+        <option value="none" {% if selected_employee == 'none' %}selected{% endif %}>– ismeretlen kártya –</option>
+        {% for employee in employees %}
+        <option value="{{ employee.id }}" {% if selected_employee == employee.id|string %}selected{% endif %}>
+          {{ employee.name }}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small" for="f-uid">Kártya UID</label>
+      <input class="form-control" id="f-uid" name="uid" value="{{ uid }}">
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small" for="f-from">Ettől</label>
+      <input class="form-control" type="date" id="f-from" name="from" value="{{ date_from }}">
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small" for="f-to">Eddig</label>
+      <input class="form-control" type="date" id="f-to" name="to" value="{{ date_to }}">
+    </div>
+    <div class="col-md-3">
+      <button class="btn btn-primary w-100" type="submit">Szűrés</button>
+    </div>
+  </form>
+</div>
+
+<div class="card p-3 shadow-sm mb-4 border-primary-subtle">
+  <h6 class="text-muted">Kézi bélyegzés felvétele</h6>
+  <p class="small text-muted">
+    Például ha valaki elfelejtett kijelentkezni. A felvitel után automatikusan lefut az
+    irányszámítás, és a művelet bekerül az audit naplóba.
+  </p>
+  <form method="post" action="/punches/new" class="row g-2 align-items-end">
+    <div class="col-md-4">
+      <label class="form-label small" for="n-emp">Dolgozó</label>
+      <select class="form-select" id="n-emp" name="employee_id" required>
+        {% for employee in employees %}
+        <option value="{{ employee.id }}">{{ employee.name }} ({{ employee.employee_code }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label small" for="n-ts">Időpont (helyi idő)</label>
+      <input class="form-control" type="datetime-local" id="n-ts" name="ts_local" step="1" required>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small" for="n-dir">Irány</label>
+      <select class="form-select" id="n-dir" name="direction">
+        <option value="">automatikus</option>
+        <option value="IN">Belépés</option>
+        <option value="OUT">Kilépés</option>
+      </select>
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-primary w-100" type="submit">Felvétel</button>
+    </div>
+  </form>
+</div>
+
+{% for punch, employee in rows %}
+  <form id="dir-{{ punch.id }}" method="post" action="/punches/{{ punch.id }}/direction"></form>
+  <form id="del-{{ punch.id }}" method="post" action="/punches/{{ punch.id }}/delete"
+        onsubmit="return confirm('Biztosan törlöd ezt a bélyegzést? A művelet naplózódik.');"></form>
+{% endfor %}
+
+<div class="card p-3 shadow-sm mb-4">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Időpont</th><th>Dolgozó</th><th>Kártya</th><th>Irány</th>
+          <th>Megjegyzés</th><th>Gateway</th><th>Beérkezett</th><th class="text-end">Kézi javítás</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for punch, employee in rows %}
+        <tr {% if punch.note and 'debounced' in punch.note %}class="table-secondary"{% elif not employee %}class="table-danger"{% endif %}>
+          <td class="text-nowrap font-monospace small">{{ punch.ts_utc|dt }}</td>
+          <td>{% if employee %}{{ employee.name }}{% else %}<span class="text-danger">ismeretlen</span>{% endif %}</td>
+          <td class="font-monospace small">{{ punch.card_uid }}</td>
+          <td>
+            {% if punch.direction == 'IN' %}<span class="badge bg-success">Belépés</span>
+            {% elif punch.direction == 'OUT' %}<span class="badge bg-secondary">Kilépés</span>
+            {% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          <td class="small text-muted">{{ punch.note or "" }}</td>
+          <td class="small text-muted">{{ punch.gateway_id or "" }}</td>
+          <td class="small text-muted text-nowrap">
+            {{ punch.received_at|dt("%m-%d %H:%M:%S") }}
+            {% if punch.received_at and (punch.received_at - punch.ts_utc).total_seconds() > 300 %}
+              <span class="badge bg-info text-dark" title="offline pufferből érkezett">késve</span>
+            {% endif %}
+          </td>
+          <td class="text-end text-nowrap">
+            <select class="form-select form-select-sm d-inline-block w-auto" form="dir-{{ punch.id }}" name="direction">
+              <option value="" {% if not punch.direction %}selected{% endif %}>automatikus</option>
+              <option value="IN" {% if punch.direction == 'IN' %}selected{% endif %}>Belépés</option>
+              <option value="OUT" {% if punch.direction == 'OUT' %}selected{% endif %}>Kilépés</option>
+            </select>
+            <button class="btn btn-sm btn-outline-primary" type="submit" form="dir-{{ punch.id }}">Ment</button>
+            <button class="btn btn-sm btn-outline-danger" type="submit" form="del-{{ punch.id }}">Töröl</button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="text-muted">Nincs esemény a megadott szűrőkkel.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card p-3 shadow-sm">
+  <h5 class="mb-3">Audit napló (utolsó {{ audit_entries|length }} művelet)</h5>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead><tr><th>Idő</th><th>Ki</th><th>Művelet</th><th>Entitás</th><th>Előtte</th><th>Utána</th></tr></thead>
+      <tbody>
+        {% for entry in audit_entries %}
+        <tr>
+          <td class="text-nowrap small font-monospace">{{ entry.ts|dt }}</td>
+          <td class="small">{{ entry.actor }}</td>
+          <td class="small">{{ entry.action }}</td>
+          <td class="small">{{ entry.entity }}#{{ entry.entity_id }}</td>
+          <td class="small text-muted audit-json">{{ entry.before_json or "" }}</td>
+          <td class="small text-muted audit-json">{{ entry.after_json or "" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-muted">Még nincs kézi módosítás.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Dolgozók{% endblock %}
+
+{% block content %}
+<h3 class="mb-3">Dolgozók</h3>
+
+<div class="card p-3 shadow-sm mb-4">
+  <h6 class="text-muted">Új dolgozó</h6>
+  <form method="post" action="/employees/new" class="row g-2 align-items-end">
+    <div class="col-md-5">
+      <label class="form-label small" for="new-name">Név</label>
+      <input class="form-control" id="new-name" name="name" required>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label small" for="new-code">Azonosító (egyedi)</label>
+      <input class="form-control" id="new-code" name="employee_code" required>
+    </div>
+    <div class="col-md-3">
+      <button class="btn btn-primary w-100" type="submit">Hozzáadás</button>
+    </div>
+  </form>
+</div>
+
+{# A szerkesztő űrlapok a táblán kívül élnek, a mezők a form attribútummal
+   kapcsolódnak hozzájuk – így a HTML érvényes marad. #}
+{% for employee, card_count in employees %}
+  <form id="emp-{{ employee.id }}" method="post" action="/employees/{{ employee.id }}/edit"></form>
+  <form id="emp-toggle-{{ employee.id }}" method="post" action="/employees/{{ employee.id }}/toggle"></form>
+{% endfor %}
+
+<div class="card p-3 shadow-sm">
+  <div class="table-responsive">
+    <table class="table align-middle">
+      <thead><tr><th>Név</th><th>Azonosító</th><th>Kártyák</th><th>Állapot</th><th class="text-end">Művelet</th></tr></thead>
+      <tbody>
+        {% for employee, card_count in employees %}
+        <tr {% if not employee.active %}class="table-secondary"{% endif %}>
+          <td><input class="form-control form-control-sm" form="emp-{{ employee.id }}" name="name" value="{{ employee.name }}"></td>
+          <td><input class="form-control form-control-sm" form="emp-{{ employee.id }}" name="employee_code" value="{{ employee.employee_code }}"></td>
+          <td>{{ card_count }}</td>
+          <td>
+            {% if employee.active %}<span class="badge bg-success">aktív</span>
+            {% else %}<span class="badge bg-secondary">inaktív</span>{% endif %}
+          </td>
+          <td class="text-end text-nowrap">
+            <button class="btn btn-sm btn-outline-primary" type="submit" form="emp-{{ employee.id }}">Mentés</button>
+            <button class="btn btn-sm btn-outline-secondary" type="submit" form="emp-toggle-{{ employee.id }}">
+              {{ "Inaktiválás" if employee.active else "Aktiválás" }}
+            </button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-muted">Még nincs felvett dolgozó.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small text-muted mb-0">
+    A dolgozókat nem lehet törölni, csak inaktiválni – a hozzájuk tartozó munkaügyi adat megmarad.
+  </p>
+</div>
+{% endblock %}
