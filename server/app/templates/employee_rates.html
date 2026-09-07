@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Órabér – {{ employee.name }}{% endblock %}
+
+{% block content %}
+<nav class="mb-3">
+  <a href="/employees" class="text-decoration-none">← Vissza a dolgozókhoz</a>
+</nav>
+
+<h3 class="mb-1">{{ employee.name }} – órabér</h3>
+<p class="text-muted">
+  Azonosító: <span class="font-monospace">{{ employee.employee_code }}</span>
+  {% if not employee.active %}<span class="badge bg-secondary">inaktív</span>{% endif %}
+</p>
+
+<p class="salary-disclaimer">
+  Tájékoztató bruttó összeg a ledolgozott órák alapján. Nem helyettesíti a bérszámfejtést.
+</p>
+
+<div class="card p-3 shadow-sm mb-4">
+  <div class="d-flex justify-content-between align-items-center">
+    <div>
+      <div class="text-muted small">Ma érvényes órabér</div>
+      <div class="fs-4 fw-semibold">
+        {{ current_rate|ft }} Ft/óra
+        {% if current_is_default %}
+          <span class="badge bg-secondary align-middle">alapértelmezett</span>
+        {% endif %}
+      </div>
+    </div>
+    {% if current_is_default %}
+    <div class="text-muted small text-end" style="max-width: 380px;">
+      Ennek a dolgozónak még nincs saját órabére, ezért a
+      <code>HOURLY_RATE</code> env változó értéke érvényes. Vegyél fel egy sort,
+      ha sajátot szeretnél.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card p-3 shadow-sm mb-4">
+  <h6 class="text-muted">Új órabér felvétele</h6>
+  <p class="small text-muted">
+    Meglévő sort nem lehet átírni – ez szándékos. Ha valaki emelést kap, vegyél fel egy
+    új sort az emelés kezdő dátumával; a korábbi hónapok kimutatása így változatlan marad.
+  </p>
+  <form method="post" action="/employees/{{ employee.id }}/rates" class="row g-2 align-items-end">
+    <div class="col-md-3">
+      <label class="form-label small" for="r-rate">Órabér (Ft/óra)</label>
+      <input class="form-control" type="number" id="r-rate" name="hourly_rate" min="0" step="1" required>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label small" for="r-from">Ettől a naptól érvényes</label>
+      <input class="form-control" type="date" id="r-from" name="valid_from" value="{{ today }}" required>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label small" for="r-note">Megjegyzés</label>
+      <input class="form-control" id="r-note" name="note" placeholder="pl. éves emelés">
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-primary w-100" type="submit">Felvétel</button>
+    </div>
+  </form>
+</div>
+
+{% for rate in rates %}
+  <form id="rate-del-{{ rate.id }}" method="post"
+        action="/employees/{{ employee.id }}/rates/{{ rate.id }}/delete"
+        onsubmit="return confirm('Biztosan törlöd ezt az órabér-sort? A művelet naplózódik.');"></form>
+{% endfor %}
+
+<div class="card p-3 shadow-sm">
+  <h5 class="mb-3">Órabér-előzmény</h5>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Érvényes ettől</th><th class="text-end">Órabér</th>
+          <th>Megjegyzés</th><th>Rögzítette</th><th>Rögzítve</th>
+          <th class="text-end">Művelet</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rate in rates %}
+        <tr>
+          <td class="text-nowrap font-monospace">{{ rate.valid_from.isoformat() }}</td>
+          <td class="text-end fw-semibold">{{ rate.hourly_rate|ft }} Ft</td>
+          <td class="small text-muted">{{ rate.note or "" }}</td>
+          <td class="small text-muted">{{ rate.created_by or "" }}</td>
+          <td class="small text-muted text-nowrap">{{ rate.created_at|dt("%Y-%m-%d %H:%M") }}</td>
+          <td class="text-end">
+            <button class="btn btn-sm btn-outline-danger" type="submit" form="rate-del-{{ rate.id }}">
+              Töröl
+            </button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-muted">Még nincs saját órabér felvéve.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small text-muted mt-3 mb-0">
+    Egy adott naphoz az a sor tartozik, aminek az érvényességi dátuma a legnagyobb
+    az adott napnál nem későbbiek közül. Törölni csak hibás felvitel esetén érdemes –
+    minden felvétel és törlés bekerül az audit naplóba.
+  </p>
+</div>
+{% endblock %}

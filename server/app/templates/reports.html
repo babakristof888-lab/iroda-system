@@ -77,15 +77,14 @@
   </p>
 </div>
 
-<div class="card p-3 shadow-sm">
-  <h5 class="mb-3">Havi összesítés</h5>
+<div class="card p-3 shadow-sm mb-4">
+  <h5 class="mb-3">Havi összesítés – jelenlét</h5>
   <div class="table-responsive">
     <table class="table table-sm align-middle mb-0">
       <thead>
         <tr>
           <th>Hónap</th><th>Dolgozó</th><th class="text-end">Ledolgozott</th>
           <th class="text-end">Óra</th>
-          {% if show_pay %}<th class="text-end">Becsült bér</th>{% endif %}
           <th class="text-end">Automatikus zárás</th>
         </tr>
       </thead>
@@ -96,20 +95,15 @@
           <td>{{ month.employee_name }}</td>
           <td class="text-end">{{ month.seconds|hours }}</td>
           <td class="text-end font-monospace">{{ "%.2f"|format(month.hours) }}</td>
-          {% if show_pay %}<td class="text-end">{{ "{:,}".format(month.pay).replace(",", " ") }} Ft</td>{% endif %}
           <td class="text-end">{{ month.auto_closed_count or "" }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="{{ 6 if show_pay else 5 }}" class="text-muted">Nincs adat.</td></tr>
+        <tr><td colspan="5" class="text-muted">Nincs adat.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
-  {% if show_pay %}
-  <p class="small text-muted mt-3 mb-0">
-    A becsült bér tájékoztató jellegű, {{ settings.hourly_rate }} Ft/óra alapon
-    (<code>HOURLY_RATE</code>). Kikapcsolható a változó 0-ra állításával.
-  </p>
-  {% endif %}
 </div>
+
+{% if salary_enabled %}{% include "_salary_section.html" %}{% endif %}
 {% endblock %}

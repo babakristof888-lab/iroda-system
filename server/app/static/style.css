@@ -29,3 +29,18 @@ body { background-color: #f0f2f5; }
 
 .chart-box { position: relative; height: 240px; }
 .chart-box-tall { height: 340px; }
+
+/* Bérszámítás */
+.salary-disclaimer {
+  color: #6c757d;
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.check-needed {
+  background-color: #fff3cd;
+  border: 1px solid #ffe69c;
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.9rem;
+}

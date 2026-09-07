@@ -9,7 +9,7 @@ import os
 import uuid
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
-from ..models import Card, Employee, Punch
+from ..models import Card, Employee, EmployeeRate, Punch
 from ..security import (
     clear_session,
     issue_session,
@@ -30,6 +30,7 @@ from ..services import env_readings as env_service
 from ..services import gateways as gateway_service
 from ..services import punches as punch_service
 from ..services import reports as report_service
+from ..services import salary as salary_service
 from ..timeutil import (
     fmt_date,
     fmt_dt,
@@ -52,10 +53,21 @@ templates.env.filters["date"] = fmt_date
 templates.env.filters["hours"] = fmt_hours
 templates.env.filters["hnum"] = hours_of
 templates.env.globals["settings"] = settings
+# A "ft" szűrő regisztrációja a _ft definíciója után, a fájl alján történik.
 
 router = APIRouter(tags=["admin"])
 
 DIRECTION_LABELS = {"IN": "Belépés", "OUT": "Kilépés", None: "—"}
+
+
+def require_salary_enabled() -> None:
+    """A bérdata érzékenyebb, mint a jelenléti adat.
+
+    SALARY_ENABLED=false esetén a bérrel kapcsolatos útvonalak úgy
+    viselkednek, mintha nem is léteznének.
+    """
+    if not settings.salary_enabled:
+        raise HTTPException(status_code=404, detail="Not Found")
 
 
 def render(request: Request, name: str, context: dict) -> HTMLResponse:
@@ -399,26 +411,42 @@ def reports_page(
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
     employee_id: str = Query(default=""),
+    month: str = Query(default=""),
     db: Session = Depends(get_db),
     _: str = Depends(require_admin),
 ) -> HTMLResponse:
     first, last, selected = _report_filters(date_from, date_to, employee_id)
     rows = report_service.collect_sessions(db, first, last, selected)
     employees = list(db.scalars(select(Employee).order_by(Employee.name)))
-    return render(
-        request,
-        "reports.html",
-        {
-            "employees": employees,
-            "selected_employee": selected,
-            "date_from": first.isoformat(),
-            "date_to": last.isoformat(),
-            "days": report_service.group_daily(rows),
-            "months": report_service.group_monthly(rows),
-            "total_seconds": sum(r.seconds for r in rows),
-            "show_pay": settings.hourly_rate > 0,
-        },
-    )
+
+    context = {
+        "employees": employees,
+        "selected_employee": selected,
+        "date_from": first.isoformat(),
+        "date_to": last.isoformat(),
+        "days": report_service.group_daily(rows),
+        "months": report_service.group_monthly(rows),
+        "total_seconds": sum(r.seconds for r in rows),
+        "salary_enabled": settings.salary_enabled,
+    }
+
+    if settings.salary_enabled:
+        # A bér-szakasz mindig egy egész hónapra vonatkozik, függetlenül a
+        # jelenléti riport dátumtartományától.
+        salary_month = salary_service.parse_month(month, last)
+        summary = salary_service.month_summary(db, salary_month)
+        context.update(
+            salary_month=salary_month,
+            salary_summary=summary,
+            salary_totals=salary_service.totals_of(summary),
+            salary_employee=(
+                salary_service.employee_month(db, selected, salary_month)
+                if selected is not None
+                else None
+            ),
+        )
+
+    return render(request, "reports.html", context)
 
 
 @router.get("/reports/export")
@@ -434,34 +462,35 @@ def reports_export(
 
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
-    header = [
-        "Dolgozo",
-        "Azonosito",
-        "Datum",
-        "Belepes",
-        "Kilepes",
-        "Ledolgozott ora",
-        "Automatikusan zarva",
-        "Meg nyitva",
-    ]
-    if settings.hourly_rate > 0:
-        header.append("Osszeg (Ft)")
-    writer.writerow(header)
+    # Ez a jelenléti kimutatás: szándékosan nincs benne pénz. Munkamenetenként
+    # szorozni óradíjat kerekítési hibát vinne bele, a bér pedig napi
+    # összesítésből számol -- azt a /reports/salary/export adja.
+    writer.writerow(
+        [
+            "Dolgozo",
+            "Azonosito",
+            "Datum",
+            "Belepes",
+            "Kilepes",
+            "Ledolgozott ora",
+            "Automatikusan zarva",
+            "Meg nyitva",
+        ]
+    )
 
     for row in sorted(rows, key=lambda r: (r.employee_name, r.started_at)):
-        record = [
-            row.employee_name,
-            row.employee_code,
-            row.local_date.isoformat(),
-            fmt_time(row.started_at),
-            fmt_time(row.ended_at) if row.ended_at else "",
-            f"{row.hours:.2f}".replace(".", ","),
-            "igen" if row.auto_closed else "nem",
-            "igen" if row.is_open else "nem",
-        ]
-        if settings.hourly_rate > 0:
-            record.append(str(int(round(row.hours * settings.hourly_rate))))
-        writer.writerow(record)
+        writer.writerow(
+            [
+                row.employee_name,
+                row.employee_code,
+                row.local_date.isoformat(),
+                fmt_time(row.started_at),
+                fmt_time(row.ended_at) if row.ended_at else "",
+                f"{row.hours:.2f}".replace(".", ","),
+                "igen" if row.auto_closed else "nem",
+                "igen" if row.is_open else "nem",
+            ]
+        )
 
     # utf-8-sig: az Excel BOM nélkül elrontaná az ékezeteket.
     payload = buffer.getvalue().encode("utf-8-sig")
@@ -471,6 +500,252 @@ def reports_export(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# --------------------------------------------------------------------------
+# Bérszámítás
+# --------------------------------------------------------------------------
+def _ft(value: int) -> str:
+    """Ezres tagolás nem törő szóközzel, magyar szokás szerint."""
+    return f"{value:,}".replace(",", "\u00a0")
+
+
+@router.get("/reports/salary/export")
+def salary_export(
+    month: str = Query(default=""),
+    employee_id: str = Query(default=""),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+    __: None = Depends(require_salary_enabled),
+) -> Response:
+    """Bér CSV. Dolgozóval napi bontás, dolgozó nélkül a havi összesítő."""
+    salary_month = salary_service.parse_month(month, today_local())
+
+    selected: int | None = None
+    if employee_id.strip():
+        try:
+            selected = int(employee_id)
+        except ValueError:
+            selected = None
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
+
+    def hours_cell(hours: float) -> str:
+        return f"{hours:.2f}".replace(".", ",")
+
+    if selected is not None:
+        group = salary_service.employee_month(db, selected, salary_month)
+        writer.writerow(
+            [
+                "Dolgozo",
+                "Azonosito",
+                "Datum",
+                "Elso belepes",
+                "Utolso kilepes",
+                "Ledolgozott ora",
+                "Orabar (Ft/ora)",
+                "Alapertelmezett orabar",
+                "Osszeg (Ft)",
+                "Automatikusan zart",
+                "Ellenorzendo ora",
+                "Ellenorzendo osszeg (Ft)",
+            ]
+        )
+        for day in group.days:
+            writer.writerow(
+                [
+                    group.employee_name,
+                    group.employee_code,
+                    day.local_date.isoformat(),
+                    fmt_time(day.first_in),
+                    fmt_time(day.last_out) if day.last_out else "",
+                    hours_cell(day.hours),
+                    day.hourly_rate,
+                    "igen" if day.rate_is_default else "nem",
+                    day.amount,
+                    "igen" if day.needs_check else "nem",
+                    hours_cell(day.auto_closed_hours) if day.needs_check else "",
+                    day.auto_closed_amount if day.needs_check else "",
+                ]
+            )
+        writer.writerow([])
+        writer.writerow(
+            [
+                "OSSZESEN",
+                "",
+                salary_month,
+                "",
+                "",
+                hours_cell(group.hours),
+                "",
+                "",
+                group.amount,
+                group.auto_closed_days,
+                hours_cell(group.auto_closed_hours),
+                group.auto_closed_amount,
+            ]
+        )
+        filename = f"ber_{group.employee_code or group.employee_id}_{salary_month}.csv"
+    else:
+        groups = salary_service.month_summary(db, salary_month)
+        totals = salary_service.totals_of(groups)
+        writer.writerow(
+            [
+                "Dolgozo",
+                "Azonosito",
+                "Honap",
+                "Ledolgozott ora",
+                "Atlagos orabar (Ft/ora)",
+                "Osszeg (Ft)",
+                "Ellenorzendo nap",
+                "Ellenorzendo ora",
+                "Ellenorzendo osszeg (Ft)",
+            ]
+        )
+        for group in groups:
+            writer.writerow(
+                [
+                    group.employee_name,
+                    group.employee_code,
+                    group.month,
+                    hours_cell(group.hours),
+                    group.average_rate,
+                    group.amount,
+                    group.auto_closed_days,
+                    hours_cell(group.auto_closed_hours),
+                    group.auto_closed_amount,
+                ]
+            )
+        writer.writerow([])
+        writer.writerow(
+            [
+                "MINDENKI OSSZESEN",
+                "",
+                salary_month,
+                hours_cell(totals.hours),
+                "",
+                totals.amount,
+                totals.auto_closed_days,
+                hours_cell(totals.auto_closed_hours),
+                totals.auto_closed_amount,
+            ]
+        )
+        filename = f"ber_osszesito_{salary_month}.csv"
+
+    payload = buffer.getvalue().encode("utf-8-sig")
+    return Response(
+        content=payload,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/employees/{employee_id}/rates", response_class=HTMLResponse)
+def employee_rates_page(
+    request: Request,
+    employee_id: int,
+    msg: str | None = None,
+    err: str | None = None,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+    __: None = Depends(require_salary_enabled),
+) -> HTMLResponse:
+    employee = db.get(Employee, employee_id)
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Nincs ilyen dolgozó")
+
+    rate, is_default = salary_service.current_rate(db, employee_id, today_local())
+    return render(
+        request,
+        "employee_rates.html",
+        {
+            "employee": employee,
+            "rates": salary_service.rate_history(db, employee_id),
+            "current_rate": rate,
+            "current_is_default": is_default,
+            "today": today_local().isoformat(),
+            "message": msg,
+            "error": err,
+        },
+    )
+
+
+@router.post("/employees/{employee_id}/rates")
+def employee_rate_add(
+    employee_id: int,
+    hourly_rate: str = Form(...),
+    valid_from: str = Form(...),
+    note: str = Form(default=""),
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_admin),
+    __: None = Depends(require_salary_enabled),
+) -> RedirectResponse:
+    back = f"/employees/{employee_id}/rates"
+    if db.get(Employee, employee_id) is None:
+        raise HTTPException(status_code=404, detail="Nincs ilyen dolgozó")
+
+    try:
+        rate_value = int(str(hourly_rate).strip().replace(" ", "").replace("\u00a0", ""))
+    except ValueError:
+        return _back(back, error="Az órabér csak egész szám lehet")
+    if rate_value < 0:
+        return _back(back, error="Az órabér nem lehet negatív")
+
+    try:
+        valid_date = date.fromisoformat(valid_from.strip())
+    except ValueError:
+        return _back(back, error="Érvénytelen kezdő dátum")
+
+    row = salary_service.add_rate(
+        db,
+        employee_id=employee_id,
+        hourly_rate=rate_value,
+        valid_from=valid_date,
+        created_by=actor,
+        note=note.strip() or None,
+    )
+    audit.record(
+        db,
+        "create",
+        "employee_rate",
+        row.id,
+        after={
+            "employee_id": employee_id,
+            "hourly_rate": rate_value,
+            "valid_from": valid_date,
+            "note": row.note,
+        },
+        actor=actor,
+    )
+    db.commit()
+    return _back(back, message=f"{_ft(rate_value)} Ft/óra érvényes {valid_date.isoformat()}-tól")
+
+
+@router.post("/employees/{employee_id}/rates/{rate_id}/delete")
+def employee_rate_delete(
+    employee_id: int,
+    rate_id: int,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_admin),
+    __: None = Depends(require_salary_enabled),
+) -> RedirectResponse:
+    back = f"/employees/{employee_id}/rates"
+    row = db.get(EmployeeRate, rate_id)
+    if row is None or row.employee_id != employee_id:
+        return _back(back, error="Nincs ilyen órabér-sor")
+
+    before = {
+        "employee_id": row.employee_id,
+        "hourly_rate": row.hourly_rate,
+        "valid_from": row.valid_from,
+        "note": row.note,
+    }
+    db.delete(row)
+    db.flush()
+    audit.record(db, "delete", "employee_rate", rate_id, before=before, actor=actor)
+    db.commit()
+    return _back(back, message="Órabér-sor törölve")
 
 
 # --------------------------------------------------------------------------
@@ -703,3 +978,8 @@ def punch_delete(
     audit.record(db, "delete", "punch", before["id"], before=before, actor=actor)
     db.commit()
     return _back("/punches", message="Bélyegzés törölve, az újraszámolás lefutott")
+
+
+# A bér-nézetek ezerelválasztós formázása. A definíció után regisztráljuk,
+# hogy a templatek is elérjék {{ osszeg|ft }} alakban.
+templates.env.filters["ft"] = _ft
