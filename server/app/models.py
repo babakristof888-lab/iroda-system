@@ -7,10 +7,12 @@ küldött nyers szöveg, auditálási célból.
 
 from __future__ import annotations
 
+from datetime import date as date_type
 from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -38,9 +40,38 @@ class Employee(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     cards: Mapped[list["Card"]] = relationship(back_populates="employee")
+    rates: Mapped[list["EmployeeRate"]] = relationship(back_populates="employee")
 
     def __repr__(self) -> str:  # pragma: no cover - csak hibakereséshez
         return f"<Employee {self.employee_code} {self.name!r}>"
+
+
+class EmployeeRate(Base):
+    """Egy dolgozó órabére, érvényességi kezdődátummal.
+
+    Szándékosan előzmény-tábla, nem mező a dolgozón: ha valaki márciusban
+    emelést kap, a februári kimutatásnak továbbra is a régi órabérrel kell
+    számolnia. Meglévő sort nem írunk felül, csak újat veszünk fel.
+
+    Feloldás egy adott napra: az a sor, aminek a `valid_from` értéke a
+    legnagyobb az adott dátumnál nem későbbiek közül.
+    """
+
+    __tablename__ = "employee_rates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(
+        ForeignKey("employees.id", ondelete="CASCADE"), nullable=False
+    )
+    hourly_rate: Mapped[int] = mapped_column(Integer, nullable=False)
+    valid_from: Mapped[date_type] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    employee: Mapped["Employee"] = relationship(back_populates="rates")
+
+    __table_args__ = (Index("ix_employee_rates_employee_valid", "employee_id", "valid_from"),)
 
 
 class Card(Base):

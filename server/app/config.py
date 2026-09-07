@@ -92,6 +92,7 @@ class Settings:
     hum_min_alert: float
     hum_max_alert: float
     env_alerts_enabled: bool
+    salary_enabled: bool
     hourly_rate: int
     gateway_offline_minutes: int
     version: str = VERSION
@@ -142,6 +143,9 @@ def load_settings() -> Settings:
         hum_min_alert=_env_float("HUM_MIN_ALERT", 25.0),
         hum_max_alert=_env_float("HUM_MAX_ALERT", 65.0),
         env_alerts_enabled=_env_bool("ENV_ALERTS_ENABLED", True),
+        salary_enabled=_env_bool("SALARY_ENABLED", True),
+        # Csak alapértelmezés: az a dolgozó számol vele, akinek nincs saját
+        # órabér-sora az employee_rates táblában.
         hourly_rate=_env_int("HOURLY_RATE", 1900),
         gateway_offline_minutes=_env_int("GATEWAY_OFFLINE_MINUTES", 5),
     )
