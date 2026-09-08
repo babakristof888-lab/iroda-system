@@ -1,0 +1,219 @@
+{# Bérszámítás a /reports oldalon. Csak SALARY_ENABLED=true esetén kerül be. #}
+
+<div class="salary-block">
+  <h4 class="mt-5 mb-2">Bérszámítás</h4>
+  <p class="salary-disclaimer">
+    Tájékoztató bruttó összeg a ledolgozott órák alapján. Nem helyettesíti a bérszámfejtést.
+  </p>
+
+  <div class="card p-3 shadow-sm mb-4">
+    <form method="get" action="/reports" class="row g-2 align-items-end">
+      <input type="hidden" name="from" value="{{ date_from }}">
+      <input type="hidden" name="to" value="{{ date_to }}">
+      <div class="col-md-3">
+        <label class="form-label small" for="s-month">Hónap</label>
+        <input class="form-control" type="month" id="s-month" name="month" value="{{ salary_month }}">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small" for="s-emp">Dolgozó</label>
+        <select class="form-select" id="s-emp" name="employee_id">
+          <option value="">– összesítő: minden dolgozó –</option>
+          {% for employee in employees %}
+          <option value="{{ employee.id }}" {% if selected_employee == employee.id %}selected{% endif %}>
+            {{ employee.name }}{% if not employee.active %} (inaktív){% endif %}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-primary w-100" type="submit">Mutasd</button>
+      </div>
+      <div class="col-md-3">
+        <a class="btn btn-outline-success w-100"
+           href="/reports/salary/export?month={{ salary_month }}&employee_id={{ selected_employee or '' }}">
+          ⬇ CSV export
+        </a>
+      </div>
+    </form>
+    <p class="small text-muted mt-3 mb-0">
+      Az éjfélen átnyúló műszak ahhoz a naphoz tartozik, amelyiken elkezdődött.
+      A még le nem zárt munkamenetek nem számítanak bele a bérbe.
+    </p>
+  </div>
+
+  {% if salary_employee %}
+  {# ---------- Havi nézet: egy dolgozó, napi bontásban ---------- #}
+  <div class="card p-3 shadow-sm mb-4">
+    <h5 class="mb-3">
+      {{ salary_employee.employee_name }} – {{ salary_month }}
+      <span class="text-muted small">({{ salary_employee.employee_code }})</span>
+    </h5>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Dátum</th><th>Be</th><th>Ki</th>
+            <th class="text-end">Ledolgozott</th>
+            <th class="text-end">Óra</th>
+            <th class="text-end">Órabér</th>
+            <th class="text-end">Összeg</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for day in salary_employee.days %}
+          <tr {% if day.needs_check %}class="auto-closed"{% endif %}>
+            <td class="text-nowrap">
+              {{ day.local_date.isoformat() }}
+              {% if day.needs_check %}<span title="automatikusan lezárt munkamenet, ellenőrzést igényel">⚠</span>{% endif %}
+              {% if day.open_count %}
+                <span class="badge bg-light text-secondary border" title="folyamatban lévő munkamenet, a bérbe nem számítva">folyamatban</span>
+              {% endif %}
+            </td>
+            <td class="font-monospace small">{{ day.first_in|time }}</td>
+            <td class="font-monospace small">
+              {% if day.last_out %}{{ day.last_out|time }}{% else %}—{% endif %}
+            </td>
+            <td class="text-end">{{ day.seconds|hours }}</td>
+            <td class="text-end font-monospace">{{ "%.2f"|format(day.hours) }}</td>
+            <td class="text-end">
+              {{ day.hourly_rate|ft }} Ft
+              {% if day.rate_is_default %}
+                <span class="badge bg-secondary" title="Ennek a dolgozónak nincs saját órabére, a HOURLY_RATE alapértelmezés érvényes">alapértelmezett</span>
+              {% endif %}
+            </td>
+            <td class="text-end fw-semibold">{{ day.amount|ft }} Ft</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="text-muted">Ebben a hónapban nincs lezárt munkamenet.</td></tr>
+          {% endfor %}
+        </tbody>
+        {% if salary_employee.days %}
+        <tfoot>
+          <tr class="table-light fw-semibold">
+            <td colspan="3">Összesen</td>
+            <td class="text-end">{{ salary_employee.seconds|hours }}</td>
+            <td class="text-end font-monospace">{{ "%.2f"|format(salary_employee.hours) }}</td>
+            <td></td>
+            <td class="text-end">{{ salary_employee.amount|ft }} Ft</td>
+          </tr>
+        </tfoot>
+        {% endif %}
+      </table>
+    </div>
+
+    {% if salary_employee.open_count %}
+    <p class="in-progress-note mt-3 mb-0">
+      {{ salary_employee.open_count }} folyamatban lévő munkamenet, a bérbe nem számítva.
+      Az összeg akkor lesz teljes, ha a kilépés is megtörtént.
+    </p>
+    {% endif %}
+
+    {% if salary_employee.auto_closed_days %}
+    <div class="check-needed mt-3">
+      <strong>Ebből ellenőrzést igényel:</strong>
+      {{ salary_employee.auto_closed_days }} nap,
+      {{ salary_employee.auto_closed_seconds|hours }},
+      {{ salary_employee.auto_closed_amount|ft }} Ft
+      <div class="small text-muted mt-1">
+        Ezeket a munkameneteket a rendszer {{ settings.auto_close_label }}-kor automatikusan lezárta,
+        mert nem érkezett kilépés. Kifizetés előtt valakinek kézzel jóvá kell hagynia.
+      </div>
+    </div>
+    {% endif %}
+
+    {% if salary_employee.uses_default_rate %}
+    <p class="small text-muted mt-3 mb-0">
+      Néhány naphoz nincs saját órabér beállítva, ezekre a
+      <code>HOURLY_RATE</code> alapértelmezés ({{ settings.hourly_rate|ft }} Ft/óra) érvényes.
+      <a href="/employees/{{ salary_employee.employee_id }}/rates">Órabér beállítása</a>
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# ---------- Összesítő nézet: egy hónap, minden dolgozó ---------- #}
+  <div class="card p-3 shadow-sm">
+    <h5 class="mb-1">Összesítő – {{ salary_month }}</h5>
+    <p class="small text-muted">Ez az a nézet, amit a könyvelőnek lehet odaadni.</p>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Dolgozó</th><th>Azonosító</th>
+            <th class="text-end">Ledolgozott</th>
+            <th class="text-end">Óra</th>
+            <th class="text-end">Átlagos órabér</th>
+            <th class="text-end">Összeg</th>
+            <th class="text-end">Ellenőrzendő</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for group in salary_summary %}
+          <tr {% if group.auto_closed_days %}class="auto-closed"{% endif %}>
+            <td>
+              <a href="/reports?from={{ date_from }}&to={{ date_to }}&month={{ salary_month }}&employee_id={{ group.employee_id }}">
+                {{ group.employee_name }}
+              </a>
+              {% if group.auto_closed_days %}<span title="tartalmaz automatikusan lezárt munkamenetet">⚠</span>{% endif %}
+              {% if group.open_count %}
+                <span class="badge bg-light text-secondary border" title="folyamatban lévő munkamenet, a bérbe nem számítva">folyamatban</span>
+              {% endif %}
+            </td>
+            <td class="small text-muted">{{ group.employee_code }}</td>
+            <td class="text-end">{{ group.seconds|hours }}</td>
+            <td class="text-end font-monospace">{{ "%.2f"|format(group.hours) }}</td>
+            <td class="text-end">
+              {{ group.average_rate|ft }} Ft
+              {% if group.distinct_rates|length > 1 %}
+                <span class="badge bg-info text-dark" title="a hónapban órabér-változás történt">változott</span>
+              {% elif group.uses_default_rate %}
+                <span class="badge bg-secondary">alapértelmezett</span>
+              {% endif %}
+            </td>
+            <td class="text-end fw-semibold">{{ group.amount|ft }} Ft</td>
+            <td class="text-end small">
+              {% if group.auto_closed_days %}
+                {{ group.auto_closed_days }} nap · {{ group.auto_closed_amount|ft }} Ft
+              {% else %}—{% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="text-muted">Ebben a hónapban nincs lezárt munkamenet.</td></tr>
+          {% endfor %}
+        </tbody>
+        {% if salary_summary %}
+        <tfoot>
+          <tr class="table-light fw-semibold">
+            <td colspan="2">Mindenki összesen</td>
+            <td class="text-end">{{ salary_totals.seconds|hours }}</td>
+            <td class="text-end font-monospace">{{ "%.2f"|format(salary_totals.hours) }}</td>
+            <td></td>
+            <td class="text-end">{{ salary_totals.amount|ft }} Ft</td>
+            <td class="text-end small">
+              {% if salary_totals.auto_closed_days %}
+                {{ salary_totals.auto_closed_days }} nap · {{ salary_totals.auto_closed_amount|ft }} Ft
+              {% else %}—{% endif %}
+            </td>
+          </tr>
+        </tfoot>
+        {% endif %}
+      </table>
+    </div>
+
+    {% if salary_totals.open_count %}
+    <p class="in-progress-note mt-3 mb-0">
+      {{ salary_totals.open_count }} folyamatban lévő munkamenet, a bérbe nem számítva.
+      Ezért mutathat a bérkimutatás kevesebb órát, mint a jelenléti riport.
+    </p>
+    {% endif %}
+
+    {% if salary_totals.auto_closed_days %}
+    <div class="check-needed mt-3">
+      <strong>Ebből ellenőrzést igényel:</strong>
+      {{ salary_totals.auto_closed_days }} nap,
+      {{ salary_totals.auto_closed_seconds|hours }},
+      {{ salary_totals.auto_closed_amount|ft }} Ft
+    </div>
+    {% endif %}
+  </div>
+</div>

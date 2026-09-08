@@ -44,6 +44,9 @@
           </td>
           <td class="text-end text-nowrap">
             <button class="btn btn-sm btn-outline-primary" type="submit" form="emp-{{ employee.id }}">Mentés</button>
+            {% if settings.salary_enabled %}
+            <a class="btn btn-sm btn-outline-success" href="/employees/{{ employee.id }}/rates">Órabér</a>
+            {% endif %}
             <button class="btn btn-sm btn-outline-secondary" type="submit" form="emp-toggle-{{ employee.id }}">
               {{ "Inaktiválás" if employee.active else "Aktiválás" }}
             </button>

@@ -14,7 +14,6 @@ from datetime import date, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..models import Employee, Punch, WorkSession
 from ..timeutil import (
     local_date_of,
@@ -79,10 +78,6 @@ class MonthGroup:
     @property
     def hours(self) -> float:
         return round(self.seconds / 3600, 2)
-
-    @property
-    def pay(self) -> int:
-        return int(round(self.seconds / 3600 * settings.hourly_rate))
 
 
 def collect_sessions(

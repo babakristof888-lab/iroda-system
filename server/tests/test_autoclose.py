@@ -48,18 +48,23 @@ def test_hattermunka_lezarja_a_kezzel_nyitva_hagyott_munkamenetet():
         assert session.ended_at == local_clock_utc(tegnap, 23, 59)
 
 
-def test_mai_nyitott_munkamenet_nem_zarul_le():
+def test_napzaras_elott_nyitott_munkamenet_nem_zarul_le():
+    """A napzárás időpontja előtt a nyitott munkamenet nyitva marad.
+
+    Az ellenőrzés pillanatát explicit átadjuk, nem a futtatás óráját
+    használjuk – különben a teszt naponta egy percig (23:59 és éjfél között)
+    elbukna.
+    """
     employee_id = make_employee()
+    ma = to_local(utcnow()).date()
+    kezdet = local_clock_utc(ma, 8, 0)
+    napkozben = local_clock_utc(ma, 17, 0)
+
     with SessionLocal() as db:
-        db.add(
-            WorkSession(
-                employee_id=employee_id, started_at=utcnow() - timedelta(hours=1), auto_closed=False
-            )
-        )
+        db.add(WorkSession(employee_id=employee_id, started_at=kezdet, auto_closed=False))
         db.commit()
 
-        # A mai napzárás még nem jött el (a teszt nem 23:59-kor fut).
-        assert punch_service.close_stale_sessions(db) == 0
+        assert punch_service.close_stale_sessions(db, now=napkozben) == 0
         assert db.scalar(select(WorkSession)).ended_at is None
 
 

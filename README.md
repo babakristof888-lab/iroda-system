@@ -62,7 +62,8 @@ külön migrációs lépés. Ha a `/data` nem írható, a log egy érthető magy
 | `HUM_MIN_ALERT` | nem | `25` | Páratartalom alsó riasztási küszöb (%). |
 | `HUM_MAX_ALERT` | nem | `65` | Páratartalom felső riasztási küszöb (%). |
 | `ENV_ALERTS_ENABLED` | nem | `true` | `false` esetén nincs környezeti figyelmeztetés a felületen. |
-| `HOURLY_RATE` | nem | `1900` | Becsült bér a riportban, Ft/óra. `0` esetén a bér-oszlop eltűnik. |
+| `SALARY_ENABLED` | nem | `true` | `false` esetén a bérrel kapcsolatos oszlopok, nézetek és exportok nem jelennek meg, a hozzájuk tartozó útvonalak 404-et adnak. |
+| `HOURLY_RATE` | nem | `1900` | **Alapértelmezett** órabér, Ft/óra. Csak arra a dolgozóra vonatkozik, akinek nincs saját órabér-sora. |
 | `COOKIE_SECURE` | nem | `true` | Csak lokális http-s fejlesztéshez állítsd `false`-ra. |
 | `SESSION_SECRET` | nem | származtatott | A session cookie aláírókulcsa. Ha nincs megadva, az `ADMIN_PASSWORD_HASH`-ből származik, így egy deploy nem lépteti ki az admint. |
 | `GATEWAY_OFFLINE_MINUTES` | nem | `5` | Ennyi idő után számít offline-nak egy gateway a dashboardon. |
@@ -218,9 +219,11 @@ eltelt időt mutatják, nem a faliórán látszó különbséget.
 |---|---|
 | `/` | Ki van bent most, gateway státusz, mai bélyegzések, aktuális hőmérséklet és páratartalom, 24 órás grafikon |
 | `/employees` | Dolgozók: hozzáadás, szerkesztés, inaktiválás |
+| `/employees/{id}/rates` | Órabér-előzmény: új sor felvétele, hibás törlése |
 | `/cards` | Kártyák és az ismeretlen UID-ok hozzárendelése |
-| `/reports` | Napi bontás és havi összesítés, szűrés dolgozóra és dátumtartományra |
-| `/reports/export` | CSV export (UTF-8 BOM, pontosvessző elválasztó) |
+| `/reports` | Napi bontás és havi összesítés, szűrés dolgozóra és dátumtartományra; alul a bérszámítás |
+| `/reports/export` | Jelenléti CSV export (UTF-8 BOM, pontosvessző elválasztó) |
+| `/reports/salary/export` | Bér CSV export: dolgozóval napi bontás, nélküle havi összesítő |
 | `/environment` | Környezeti adatok 24 óra / 7 nap / 30 nap bontásban, grafikon, táblázat, CSV |
 | `/punches` | Nyers eseménynapló, szűrés, kézi javítás, audit napló |
 
@@ -231,6 +234,101 @@ Belépés: egyetlen admin jelszóval, aláírt session cookie-val
 vehető fel. Minden ilyen művelet bekerül az `audit_log` táblába a régi és az új
 értékkel együtt, és utána lefut a `recalculate_directions`. A kézzel megadott
 irány horgonyként viselkedik: a későbbi újraszámolás nem írja felül.
+
+## Bérszámítás
+
+Tájékoztató bruttó összeg a ledolgozott órák alapján. **Nem bérszámfejtés:** nincs
+benne adó, járulék, pótlék, szabadság vagy táppénz.
+
+### Órabér dolgozónként, előzménnyel
+
+Az órabér nem egy mező a dolgozón, hanem az `employee_rates` tábla sorai, mindegyik
+egy érvényességi kezdődátummal. Egy adott naphoz az a sor tartozik, aminek a
+`valid_from` értéke a legnagyobb az adott dátumnál nem későbbiek közül.
+
+Ezért nem írja át visszamenőleg a régi hónapokat, ha valaki emelést kap: a februári
+kimutatás a februárban érvényes órabérrel számol akkor is, ha márciustól új sor lép
+életbe. Meglévő sort nem lehet szerkeszteni — csak újat felvenni vagy hibásat törölni.
+
+**Egy sor törlése viszont visszamenőleg átírja a korábbi kimutatásokat** — pontosan
+az, ami ellen ez a tábla véd. Ezért a törlés külön megerősítő lapot kér, ami megmutatja,
+mely hónapok összege mennyivel változna (`2026-09: 16 000 Ft → 8 000 Ft, −8 000 Ft`),
+és mi lép a törölt sor helyébe. Megerősítés nélküli POST nem töröl, csak visszairányít
+erre a lapra.
+
+Minden bérsor-művelet bekerül az `audit_log` táblába a régi **és** az új értékkel:
+felvételnél az, hogy mit vált fel az új sor, törlésnél az, hogy mi lép a helyébe és
+mely hónapokat érinti.
+
+Ha egy dolgozónak egyáltalán nincs sora, a `HOURLY_RATE` env érték az alapértelmezés.
+A felület ezt „alapértelmezett" jelöléssel mutatja, hogy látszódjon, kinél nincs még
+beállítva a saját órabér.
+
+Kezelés: **Dolgozók → Órabér** (`/employees/{id}/rates`).
+
+### Kerekítés
+
+A másodperceket összegezzük, és **csak a napi sor végén kerekítünk** egész forintra,
+`Decimal`-lal, félnél felfelé. A havi összeg a napi összegek szummája, nem a hónap
+nyers másodperceiből újraszámolt érték — így a felületen látható napi sorok pontosan
+kiadják a havi végösszeget.
+
+A művelet sorrendje is számít: **előbb szorzunk, aztán osztunk**
+(`másodperc × órabér / 3600`). A másodperc/óra hányados szakaszos tizedestört
+(3600 = 2⁴ · 3² · 5²), a `Decimal` pontossága pedig véges — fordított sorrendben egy
+levágott hányadost szoroznánk fel. Így a szorzat egzakt egész marad, és egyetlen
+osztás van a végén. Teszt hasonlítja össze az eredményt egzakt racionális
+aritmetikával (`fractions.Fraction`).
+
+Külön teszt őrzi, hogy a CSV exportban szereplő összeg **soronként és a végösszegben
+is pontosan egyezik** a képernyőn megjelenővel — ez fogná meg, ha valaha visszakerülne
+a kétszeres kerekítés.
+
+```
+munkamenetek (csak lezártak)
+   → napi csoport a kezdés lokális napja szerint
+   → sum(duration_seconds)
+   → × az adott NAPRA érvényes órabér
+   → kerekítés egész Ft-ra, EGYSZER
+   → havi összeg = Σ napi összeg
+```
+
+Az éjfélen átnyúló műszak ahhoz a naphoz tartozik, amelyiken elkezdődött. A még le
+nem zárt munkamenetek nem számítanak bele semmibe — a jelenléti riport mutatja az
+eddig eltelt időt, a bér nem számol vele.
+
+Ez viszont nem csendben történik: ha az adott hónapban van folyamatban lévő
+munkamenet, a bér-nézetben megjelenik egy halvány sor — *„1 folyamatban lévő
+munkamenet, a bérbe nem számítva"* —, az érintett napi sor pedig „folyamatban"
+jelölést kap. Enélkül az irodavezető délután megnyitná a bérkimutatást, kevesebb órát
+látna, mint a jelenlétiben, és azt hinné, hibás a rendszer. Aki csak folyamatban lévő
+munkamenettel rendelkezik, az is megjelenik az összesítőben, nulla forinttal.
+
+### Ellenőrzést igénylő tételek
+
+Az `auto_closed` munkamenetek (amiket a rendszer az `AUTO_CLOSE_HOUR` időpontjában zárt le, mert
+valaki elfelejtett kijelentkezni) **beleszámítanak** az összegbe — kihagyva hiányozna
+a pénz. De sárga háttérrel és ⚠ ikonnal jelennek meg, és külön is összesítve:
+„Ebből ellenőrzést igényel: X nap, Y óra, Z Ft". Ez az az összeg, amit kifizetés
+előtt valakinek kézzel jóvá kell hagynia. A részösszeg csak az automatikusan lezárt
+munkameneteket tartalmazza, nem a teljes napot.
+
+### Nézetek
+
+A `/reports` oldal alján, két blokkban:
+
+* **Havi nézet** — egy dolgozó egy hónapja, naponként egy sorral: dátum, be-ki
+  időpont, ledolgozott óra, órabér, összeg
+* **Összesítő** — egy hónap minden dolgozóval: összes óra, átlagos órabér, összeg.
+  Ez az a nézet, amit a könyvelőnek lehet odaadni.
+
+CSV export mindkettőhöz: `/reports/salary/export?month=YYYY-MM[&employee_id=N]`,
+`utf-8-sig` kódolással és pontosvessző elválasztóval, külön oszlopban az
+`auto_closed` jelöléssel.
+
+A jelenléti CSV (`/reports/export`) szándékosan **nem tartalmaz pénzt**: ott a sorok
+munkamenetenkéntiek, és munkamenetenként szorozni óradíjat kerekítési hibát vinne
+bele. A pénz a napi összesítésből számol, azt a bér-export adja.
 
 ## Adatmegőrzés
 
