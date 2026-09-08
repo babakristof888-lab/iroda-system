@@ -65,6 +65,9 @@
             <td class="text-nowrap">
               {{ day.local_date.isoformat() }}
               {% if day.needs_check %}<span title="automatikusan lezárt munkamenet, ellenőrzést igényel">⚠</span>{% endif %}
+              {% if day.open_count %}
+                <span class="badge bg-light text-secondary border" title="folyamatban lévő munkamenet, a bérbe nem számítva">folyamatban</span>
+              {% endif %}
             </td>
             <td class="font-monospace small">{{ day.first_in|time }}</td>
             <td class="font-monospace small">
@@ -97,6 +100,13 @@
         {% endif %}
       </table>
     </div>
+
+    {% if salary_employee.open_count %}
+    <p class="in-progress-note mt-3 mb-0">
+      {{ salary_employee.open_count }} folyamatban lévő munkamenet, a bérbe nem számítva.
+      Az összeg akkor lesz teljes, ha a kilépés is megtörtént.
+    </p>
+    {% endif %}
 
     {% if salary_employee.auto_closed_days %}
     <div class="check-needed mt-3">
@@ -145,6 +155,9 @@
                 {{ group.employee_name }}
               </a>
               {% if group.auto_closed_days %}<span title="tartalmaz automatikusan lezárt munkamenetet">⚠</span>{% endif %}
+              {% if group.open_count %}
+                <span class="badge bg-light text-secondary border" title="folyamatban lévő munkamenet, a bérbe nem számítva">folyamatban</span>
+              {% endif %}
             </td>
             <td class="small text-muted">{{ group.employee_code }}</td>
             <td class="text-end">{{ group.seconds|hours }}</td>
@@ -186,6 +199,13 @@
         {% endif %}
       </table>
     </div>
+
+    {% if salary_totals.open_count %}
+    <p class="in-progress-note mt-3 mb-0">
+      {{ salary_totals.open_count }} folyamatban lévő munkamenet, a bérbe nem számítva.
+      Ezért mutathat a bérkimutatás kevesebb órát, mint a jelenléti riport.
+    </p>
+    {% endif %}
 
     {% if salary_totals.auto_closed_days %}
     <div class="check-needed mt-3">
