@@ -447,8 +447,11 @@ def test_orabér_lap_felvetel_es_torles_naplozva(admin):
         )
         assert entry is not None
         assert '"hourly_rate": 2400' in entry.after_json
+        # Az "előtte" azt rögzíti, mit vált fel az új sor.
+        assert '"effective_hourly_rate": 1900' in entry.before_json
+        assert '"was_default": true' in entry.before_json
 
-    admin.post(f"/employees/{employee_id}/rates/{rate_id}/delete")
+    admin.post(f"/employees/{employee_id}/rates/{rate_id}/delete", data={"confirm": "igen"})
 
     with SessionLocal() as db:
         assert salary_service.rate_history(db, employee_id) == []
@@ -456,7 +459,10 @@ def test_orabér_lap_felvetel_es_torles_naplozva(admin):
             select(AuditLog).where(AuditLog.entity == "employee_rate", AuditLog.action == "delete")
         )
         assert entry is not None
+        # Régi ÉS új érték is bekerül: mi volt, és mi lép a helyébe.
         assert '"hourly_rate": 2400' in entry.before_json
+        assert '"effective_hourly_rate": 1900' in entry.after_json
+        assert '"becomes_default": true' in entry.after_json
 
 
 def test_hibas_orabér_bemenet_nem_hoz_letre_sort(admin):
@@ -568,3 +574,314 @@ def test_a_jelenleti_riport_valtozatlanul_mukodik(admin):
 
     with SessionLocal() as db:
         assert db.scalar(select(Employee).where(Employee.id == employee_id)) is not None
+
+
+# --------------------------------------------------------------------------
+# Egzakt aritmetika: a kerekítés nem függhet a Decimal pontosságától
+# --------------------------------------------------------------------------
+def test_forint_egyezik_az_egzakt_racionalis_ertekkel():
+    """A `forint` előbb szoroz, aztán oszt, így a szorzat egzakt egész marad.
+
+    Fordított sorrendben a másodperc/óra hányados szakaszos tizedestört lenne
+    (3600 = 2^4 · 3^2 · 5^2), és egy levágott hányadost szoroznánk fel.
+    A mérce az egzakt racionális érték, félnél felfelé kerekítve.
+    """
+    from fractions import Fraction
+
+    def egzakt(seconds: int, rate: int) -> int:
+        egesz, maradek = divmod(Fraction(seconds * rate, 3600), 1)
+        return int(egesz) + (1 if maradek >= Fraction(1, 2) else 0)
+
+    ertekek = [
+        (0, 1900),
+        (1, 1),
+        (1800, 1),  # pontosan 0,5 Ft -> felfelé
+        (3600, 1900),
+        (27135, 1900),
+        (29000, 1900),
+        (24601, 1900),
+        (86399, 2137),
+        (123457, 3333),
+    ]
+    ertekek += [(seconds, rate) for seconds in range(1, 40000, 997) for rate in (7, 13, 1900, 5000)]
+
+    for seconds, rate in ertekek:
+        assert salary_service.forint(seconds, rate) == egzakt(seconds, rate), (seconds, rate)
+
+
+# --------------------------------------------------------------------------
+# A képernyőn látható összeg = a CSV-ben lévő összeg
+# --------------------------------------------------------------------------
+def _tabla_sorok(html: str, kezdet: str) -> list[list[str]]:
+    """A `kezdet` utáni első HTML táblázat sorai, cellánként, tagek nélkül."""
+    import re
+
+    blokk = html.split(kezdet, 1)[1]
+    sorok = []
+    for nyers in re.findall(r"<tr[^>]*>(.*?)</tr>", blokk, re.S):
+        cellak = [
+            " ".join(re.sub(r"<[^>]+>", " ", cella).split())
+            for cella in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", nyers, re.S)
+        ]
+        if any(cellak):
+            sorok.append(cellak)
+    return sorok
+
+
+def _osszegek(cellak: list[str]) -> list[int]:
+    """A "12 806 Ft" alakú cellákból a szám. A nem törő szóköz is elválasztó."""
+    import re
+
+    talalatok = []
+    for cella in cellak:
+        egyszeru = cella.replace(" ", " ")
+        talalat = re.fullmatch(r"([\d ]+) Ft", egyszeru)
+        if talalat:
+            talalatok.append(int(talalat.group(1).replace(" ", "")))
+    return talalatok
+
+
+def test_a_csv_osszegek_pontosan_egyeznek_a_kepernyovel_napi_bontasban(admin):
+    """Regresszió: ha valaha visszakerül a kétszeres kerekítés, ez elbukik."""
+    employee_id = make_employee()
+    make_rate(employee_id, 1900, "2026-01-01")
+    make_rate(employee_id, 2350, "2026-09-15")
+    # Szándékosan csúnya másodpercek, hogy a kerekítés számítson.
+    for nap, mp in [("01", 27135), ("02", 29027), ("10", 24669), ("20", 31111), ("21", 28801)]:
+        make_session_seconds(employee_id, f"2026-09-{nap}T08:00:00+02:00", mp)
+
+    oldal = admin.get(f"/reports?month=2026-09&employee_id={employee_id}")
+    assert oldal.status_code == 200
+
+    kepernyo: list[int] = []
+    kepernyo_vegosszeg = None
+    for cellak in _tabla_sorok(oldal.text, "Bérszámítás"):
+        if cellak and cellak[0].startswith("2026-09"):
+            kepernyo.append(_osszegek(cellak)[-1])  # a sor utolsó Ft-értéke az összeg
+        elif cellak and cellak[0] == "Összesen":
+            kepernyo_vegosszeg = _osszegek(cellak)[-1]
+
+    csv_szoveg = admin.get(
+        f"/reports/salary/export?month=2026-09&employee_id={employee_id}"
+    ).content.decode("utf-8-sig")
+    csv_sorok = [sor.split(";") for sor in csv_szoveg.strip().split("\r\n") if sor]
+    csv_osszegek = [int(sor[8]) for sor in csv_sorok if sor[0] not in ("Dolgozo", "OSSZESEN", "")]
+    csv_vegosszeg = next(int(sor[8]) for sor in csv_sorok if sor[0] == "OSSZESEN")
+
+    assert len(kepernyo) == 5
+    assert kepernyo == csv_osszegek  # soronként
+    assert kepernyo_vegosszeg == csv_vegosszeg == sum(csv_osszegek)  # és a végösszegben
+
+
+def test_a_csv_osszegek_pontosan_egyeznek_a_kepernyovel_osszesitoben(admin):
+    elso = make_employee(name="Első Elek", code="E001", uid="AAAA1111")
+    masodik = make_employee(name="Második Mária", code="E002", uid="BBBB2222")
+    make_rate(elso, 1900, "2026-01-01")
+    make_rate(masodik, 2350, "2026-01-01")
+    make_session_seconds(elso, "2026-09-01T08:00:00+02:00", 27135)
+    make_session_seconds(elso, "2026-09-02T08:00:00+02:00", 29027)
+    make_session_seconds(masodik, "2026-09-01T08:00:00+02:00", 24669)
+
+    oldal = admin.get("/reports?month=2026-09")
+    # Az összesítő sorokban két Ft-érték is van (átlagos órabér és összeg),
+    # ezért nevesített oszlopindexből olvasunk.
+    OSSZEG_OSZLOP, VEGOSSZEG_OSZLOP = 5, 4
+    kepernyo: list[int] = []
+    kepernyo_vegosszeg = None
+    for cellak in _tabla_sorok(oldal.text, "Összesítő –"):
+        if cellak and cellak[0].startswith(("Első", "Második")):
+            kepernyo.append(_osszegek([cellak[OSSZEG_OSZLOP]])[0])
+        elif cellak and cellak[0] == "Mindenki összesen":
+            kepernyo_vegosszeg = _osszegek([cellak[VEGOSSZEG_OSZLOP]])[0]
+
+    csv_szoveg = admin.get("/reports/salary/export?month=2026-09").content.decode("utf-8-sig")
+    csv_sorok = [sor.split(";") for sor in csv_szoveg.strip().split("\r\n") if sor]
+    csv_osszegek = [
+        int(sor[5]) for sor in csv_sorok if sor[0] not in ("Dolgozo", "MINDENKI OSSZESEN", "")
+    ]
+    csv_vegosszeg = next(int(sor[5]) for sor in csv_sorok if sor[0] == "MINDENKI OSSZESEN")
+
+    assert kepernyo == csv_osszegek
+    assert kepernyo_vegosszeg == csv_vegosszeg == sum(csv_osszegek)
+
+
+# --------------------------------------------------------------------------
+# Folyamatban lévő munkamenetek jelzése
+# --------------------------------------------------------------------------
+def test_folyamatban_levo_munkamenet_szamlalva_de_nem_szamolva():
+    employee_id = make_employee()
+    make_rate(employee_id, 1000, "2026-01-01")
+    ma = today_local()
+    honap = ma.strftime("%Y-%m")
+
+    # Egy lezárt és egy folyamatban lévő munkamenet ugyanazon a mai napon.
+    make_session(
+        employee_id,
+        f"{ma.isoformat()}T06:00:00+02:00",
+        f"{ma.isoformat()}T10:00:00+02:00",
+    )
+    with SessionLocal() as db:
+        db.add(
+            WorkSession(
+                employee_id=employee_id,
+                started_at=utcnow() - timedelta(hours=1),
+                auto_closed=False,
+            )
+        )
+        db.commit()
+
+        group = salary_service.employee_month(db, employee_id, honap)
+
+    assert group.open_count == 1
+    assert group.days[0].open_count == 1
+    # A pénzben viszont nincs benne.
+    assert group.seconds == 4 * 3600
+    assert group.amount == 4000
+
+
+def test_csak_folyamatban_levo_munkamenet_eseten_is_latszik_a_dolgozo():
+    """Ne tűnjön el valaki az összesítőből csak azért, mert épp bent van."""
+    employee_id = make_employee()
+    with SessionLocal() as db:
+        db.add(
+            WorkSession(
+                employee_id=employee_id,
+                started_at=utcnow() - timedelta(hours=2),
+                auto_closed=False,
+            )
+        )
+        db.commit()
+
+    honap = today_local().strftime("%Y-%m")
+    with SessionLocal() as db:
+        groups = salary_service.month_summary(db, honap)
+        totals = salary_service.totals_of(groups)
+
+    assert len(groups) == 1
+    assert groups[0].employee_id == employee_id
+    assert groups[0].amount == 0
+    assert groups[0].open_count == 1
+    assert totals.open_count == 1
+
+
+def test_a_feluleten_megjelenik_a_folyamatban_levo_jelzes(admin):
+    employee_id = make_employee()
+    with SessionLocal() as db:
+        db.add(
+            WorkSession(
+                employee_id=employee_id,
+                started_at=utcnow() - timedelta(hours=1),
+                auto_closed=False,
+            )
+        )
+        db.commit()
+
+    honap = today_local().strftime("%Y-%m")
+    oldal = admin.get(f"/reports?month={honap}&employee_id={employee_id}")
+    assert "folyamatban lévő munkamenet" in oldal.text
+    assert "a bérbe nem számítva" in oldal.text
+
+
+def test_lezart_honapban_nincs_folyamatban_jelzes(admin):
+    employee_id = make_employee()
+    make_session(employee_id, "2026-09-10T08:00:00+02:00", "2026-09-10T16:00:00+02:00")
+
+    oldal = admin.get(f"/reports?month=2026-09&employee_id={employee_id}")
+    assert "folyamatban lévő munkamenet" not in oldal.text
+
+
+# --------------------------------------------------------------------------
+# Bérsor törlése: megerősítés és hatás
+# --------------------------------------------------------------------------
+def test_megerosites_nelkul_a_bersor_nem_torlodik(admin):
+    employee_id = make_employee()
+    rate_id = make_rate(employee_id, 2400, "2026-09-01")
+
+    valasz = admin.post(
+        f"/employees/{employee_id}/rates/{rate_id}/delete", follow_redirects=False
+    )
+    assert valasz.status_code == 303
+    assert valasz.headers["location"].endswith(f"/rates/{rate_id}/delete")
+
+    with SessionLocal() as db:
+        assert len(salary_service.rate_history(db, employee_id)) == 1
+
+
+def test_a_megerosito_lap_megmutatja_az_erintett_honapokat(admin):
+    employee_id = make_employee()
+    make_rate(employee_id, 1000, "2026-01-01")
+    rate_id = make_rate(employee_id, 2000, "2026-09-01")
+    make_session(employee_id, "2026-09-10T08:00:00+02:00", "2026-09-10T16:00:00+02:00")
+
+    oldal = admin.get(f"/employees/{employee_id}/rates/{rate_id}/delete")
+    assert oldal.status_code == 200
+    assert "visszamenőleg módosítja a 2026.09 óta készült" in oldal.text
+    # 8 óra: 2000 Ft-tal 16 000, a törlés után 1000 Ft-tal 8 000, a különbség -8 000.
+    szoveg = oldal.text.replace("\u00a0", " ")
+    assert "16 000 Ft" in szoveg
+    assert "8 000 Ft" in szoveg
+    assert "-8 000 Ft" in szoveg
+    assert "2026-09" in oldal.text
+
+
+def test_a_megerosito_lap_a_helyebe_lepo_orabért_is_mutatja(admin):
+    employee_id = make_employee()
+    rate_id = make_rate(employee_id, 2000, "2026-09-01")  # nincs korábbi sor
+
+    oldal = admin.get(f"/employees/{employee_id}/rates/{rate_id}/delete")
+    assert "alapértelmezett" in oldal.text
+    assert "HOURLY_RATE" in oldal.text
+
+
+def test_a_torles_hatasa_kiszamolhato_service_szinten():
+    employee_id = make_employee()
+    make_rate(employee_id, 1000, "2026-01-01")
+    rate_id = make_rate(employee_id, 2000, "2026-09-01")
+    make_session(employee_id, "2026-09-10T08:00:00+02:00", "2026-09-10T16:00:00+02:00")
+
+    with SessionLocal() as db:
+        rate = db.get(EmployeeRate, rate_id)
+        impact = salary_service.rate_deletion_impact(db, rate)
+
+    assert impact.replacement_rate == 1000
+    assert impact.replacement_is_default is False
+    assert impact.has_effect is True
+    valtozok = {month.month: (month.amount_before, month.amount_after) for month in impact.changed_months}
+    assert valtozok["2026-09"] == (16000, 8000)
+    assert impact.total_difference == -8000
+
+
+def test_adat_nelkuli_bersor_torlese_semmit_nem_valtoztat():
+    employee_id = make_employee()
+    rate_id = make_rate(employee_id, 2000, "2026-09-01")
+
+    with SessionLocal() as db:
+        impact = salary_service.rate_deletion_impact(db, db.get(EmployeeRate, rate_id))
+
+    assert impact.has_effect is False
+    assert impact.total_difference == 0
+
+
+def test_megerositessel_torolheto_es_a_kimutatas_valtozik(admin):
+    employee_id = make_employee()
+    make_rate(employee_id, 1000, "2026-01-01")
+    rate_id = make_rate(employee_id, 2000, "2026-09-01")
+    make_session(employee_id, "2026-09-10T08:00:00+02:00", "2026-09-10T16:00:00+02:00")
+
+    with SessionLocal() as db:
+        assert salary_service.employee_month(db, employee_id, "2026-09").amount == 16000
+
+    admin.post(f"/employees/{employee_id}/rates/{rate_id}/delete", data={"confirm": "igen"})
+
+    with SessionLocal() as db:
+        assert salary_service.employee_month(db, employee_id, "2026-09").amount == 8000
+        entry = db.scalar(
+            select(AuditLog).where(AuditLog.entity == "employee_rate", AuditLog.action == "delete")
+        )
+        assert '"affected_months"' in entry.after_json
+        assert "2026-09" in entry.after_json
+
+
+def test_a_torles_utvonalai_is_404_ha_a_ber_ki_van_kapcsolva(admin, salary_disabled):
+    employee_id = make_employee()
+    assert admin.get(f"/employees/{employee_id}/rates/1/delete").status_code == 404
