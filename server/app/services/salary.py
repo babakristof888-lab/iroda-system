@@ -38,10 +38,16 @@ def forint(seconds: int, hourly_rate: int) -> int:
     `Decimal`-lal számol, nem float-tal, és félnél felfelé kerekít. A Python
     beépített `round()`-ja bankári kerekítést használ (`round(2.5) == 2`),
     ami pénznél meglepő és nehezen magyarázható.
+
+    A műveleti sorrend szándékos: **előbb szorzunk, aztán osztunk**. A
+    másodperc/óra hányados szakaszos tizedestört (3600 = 2^4 · 3^2 · 5^2, a
+    hármas szorzó miatt), a `Decimal` pontossága pedig véges -- ha előbb
+    osztanánk, egy levágott hányadost szoroznánk fel. Így viszont a szorzat
+    egzakt egész, és egyetlen osztás marad a végén.
     """
     if seconds <= 0 or hourly_rate == 0:
         return 0
-    amount = (Decimal(int(seconds)) / SECONDS_PER_HOUR) * Decimal(int(hourly_rate))
+    amount = (Decimal(int(seconds)) * Decimal(int(hourly_rate))) / SECONDS_PER_HOUR
     return int(amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
@@ -59,7 +65,14 @@ class RateResolver:
     már nem indít lekérdezést.
     """
 
-    def __init__(self, db: Session, employee_ids: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        employee_ids: list[int] | None = None,
+        exclude_rate_id: int | None = None,
+    ) -> None:
+        """`exclude_rate_id`-vel megnézhető, mi lenne, ha egy sor nem létezne –
+        ez adja a törlés hatásának előzetes kiszámítását."""
         query = select(EmployeeRate).order_by(
             EmployeeRate.employee_id, EmployeeRate.valid_from, EmployeeRate.id
         )
@@ -68,6 +81,8 @@ class RateResolver:
                 self._by_employee: dict[int, list[EmployeeRate]] = {}
                 return
             query = query.where(EmployeeRate.employee_id.in_(employee_ids))
+        if exclude_rate_id is not None:
+            query = query.where(EmployeeRate.id != exclude_rate_id)
 
         by_employee: dict[int, list[EmployeeRate]] = defaultdict(list)
         for row in db.scalars(query):
@@ -145,6 +160,10 @@ class SalaryDay:
     seconds: int = 0
     auto_closed_seconds: int = 0
     auto_closed_count: int = 0
+    # Erre a napra eső, még le nem zárt munkamenetek. A bérbe nem számítanak,
+    # de meg kell jelenniük, különben az irodavezető kevesebb órát lát, mint a
+    # jelenléti riportban, és azt hiszi, hibás a rendszer.
+    open_count: int = 0
 
     @property
     def hours(self) -> float:
@@ -189,6 +208,9 @@ class SalaryEmployeeMonth:
     employee_code: str
     month: str
     days: list[SalaryDay] = field(default_factory=list)
+    # A hónap összes folyamatban lévő munkamenete – azokon a napokon is,
+    # ahol egyetlen lezárt munkamenet sincs.
+    open_count: int = 0
 
     @property
     def seconds(self) -> int:
@@ -256,17 +278,39 @@ def parse_month(raw: str | None, fallback: date) -> str:
     return fallback.strftime("%Y-%m")
 
 
-def salary_days(
-    db: Session, first: date, last: date, employee_id: int | None = None
-) -> list[SalaryDay]:
-    """Napi bér-sorok a megadott lokális dátumtartományra.
+@dataclass
+class SalaryPeriod:
+    """Egy időszak bér-adatai: a napi sorok és a bérbe nem számított nyitottak."""
 
-    A nyitott (le nem zárt) munkamenetek kimaradnak: amíg valaki bent van,
-    nincs mit kifizetni. Az `auto_closed` munkamenetek viszont beleszámítanak
-    — csak külön is összesítjük őket, mert kézi jóváhagyást igényelnek.
+    days: list[SalaryDay] = field(default_factory=list)
+    open_rows: list[SessionRow] = field(default_factory=list)
+
+    def open_count_for(self, employee_id: int) -> int:
+        return sum(1 for row in self.open_rows if row.employee_id == employee_id)
+
+
+def compute_period(
+    db: Session,
+    first: date,
+    last: date,
+    employee_id: int | None = None,
+    exclude_rate_id: int | None = None,
+) -> SalaryPeriod:
+    """Napi bér-sorok és a folyamatban lévő munkamenetek egy lekérdezésből.
+
+    A nyitott (le nem zárt) munkamenetek nem számítanak a bérbe: amíg valaki
+    bent van, nincs mit kifizetni. Nem tűnnek el viszont nyomtalanul – a
+    számukat visszaadjuk, hogy a felület jelezni tudja őket.
+
+    Az `auto_closed` munkamenetek beleszámítanak – kihagyva hiányozna a pénz –,
+    csak külön is összesítjük őket, mert kézi jóváhagyást igényelnek.
     """
-    rows = [row for row in collect_sessions(db, first, last, employee_id) if not row.is_open]
-    resolver = RateResolver(db, sorted({row.employee_id for row in rows}))
+    all_rows = collect_sessions(db, first, last, employee_id)
+    rows = [row for row in all_rows if not row.is_open]
+    open_rows = [row for row in all_rows if row.is_open]
+    resolver = RateResolver(
+        db, sorted({row.employee_id for row in rows}), exclude_rate_id=exclude_rate_id
+    )
 
     groups: OrderedDict[tuple[int, date], SalaryDay] = OrderedDict()
     for row in sorted(rows, key=lambda r: (r.employee_name, r.local_date, r.started_at)):
@@ -288,7 +332,21 @@ def salary_days(
         if row.auto_closed:
             day.auto_closed_seconds += row.seconds
             day.auto_closed_count += 1
-    return list(groups.values())
+
+    # A folyamatban lévőket rávetítjük azokra a napokra, ahol van már sor.
+    for row in open_rows:
+        day = groups.get((row.employee_id, row.local_date))
+        if day is not None:
+            day.open_count += 1
+
+    return SalaryPeriod(days=list(groups.values()), open_rows=open_rows)
+
+
+def salary_days(
+    db: Session, first: date, last: date, employee_id: int | None = None
+) -> list[SalaryDay]:
+    """Csak a napi sorok, a nyitottak nélkül."""
+    return compute_period(db, first, last, employee_id).days
 
 
 def group_by_employee_month(days: list[SalaryDay], month: str) -> list[SalaryEmployeeMonth]:
@@ -307,29 +365,58 @@ def group_by_employee_month(days: list[SalaryDay], month: str) -> list[SalaryEmp
     return list(groups.values())
 
 
-def employee_month(db: Session, employee_id: int, month: str) -> SalaryEmployeeMonth:
+def employee_month(
+    db: Session, employee_id: int, month: str, exclude_rate_id: int | None = None
+) -> SalaryEmployeeMonth:
     """Egy dolgozó egy hónapja, napi bontásban."""
     first, last = month_bounds(month)
-    days = salary_days(db, first, last, employee_id)
-    groups = group_by_employee_month(days, month)
+    period = compute_period(db, first, last, employee_id, exclude_rate_id=exclude_rate_id)
+    groups = group_by_employee_month(period.days, month)
     if groups:
+        groups[0].open_count = period.open_count_for(employee_id)
         return groups[0]
 
-    # Nincs adat: üres, de névvel kitöltött csoportot adunk vissza, hogy a
-    # felület akkor is tudja, kiről van szó.
+    # Nincs lezárt munkamenet: üres, de névvel kitöltött csoportot adunk
+    # vissza, hogy a felület tudja, kiről van szó -- és hogy egy éppen bent
+    # lévő dolgozónál is megjelenjen a "folyamatban" jelzés.
     employee = db.get(Employee, employee_id)
     return SalaryEmployeeMonth(
         employee_id=employee_id,
         employee_name=employee.name if employee else "?",
         employee_code=employee.employee_code if employee else "",
         month=month,
+        open_count=period.open_count_for(employee_id),
     )
 
 
 def month_summary(db: Session, month: str) -> list[SalaryEmployeeMonth]:
-    """Egy hónap minden dolgozóval — ez a nézet megy a könyvelőnek."""
+    """Egy hónap minden dolgozóval — ez a nézet megy a könyvelőnek.
+
+    Az a dolgozó is szerepel, akinek csak folyamatban lévő munkamenete van:
+    nulla forinttal, de "folyamatban" jelzéssel. Így nem tűnik el valaki a
+    listáról csak azért, mert épp bent van.
+    """
     first, last = month_bounds(month)
-    return group_by_employee_month(salary_days(db, first, last), month)
+    period = compute_period(db, first, last)
+    groups = group_by_employee_month(period.days, month)
+
+    ismert = {group.employee_id for group in groups}
+    for group in groups:
+        group.open_count = period.open_count_for(group.employee_id)
+
+    for row in period.open_rows:
+        if row.employee_id not in ismert:
+            ismert.add(row.employee_id)
+            groups.append(
+                SalaryEmployeeMonth(
+                    employee_id=row.employee_id,
+                    employee_name=row.employee_name,
+                    employee_code=row.employee_code,
+                    month=month,
+                    open_count=period.open_count_for(row.employee_id),
+                )
+            )
+    return sorted(groups, key=lambda g: g.employee_name)
 
 
 @dataclass
@@ -341,6 +428,7 @@ class SalaryTotals:
     auto_closed_days: int = 0
     auto_closed_seconds: int = 0
     auto_closed_amount: int = 0
+    open_count: int = 0
 
     @property
     def hours(self) -> float:
@@ -358,4 +446,84 @@ def totals_of(groups: list[SalaryEmployeeMonth]) -> SalaryTotals:
         auto_closed_days=sum(group.auto_closed_days for group in groups),
         auto_closed_seconds=sum(group.auto_closed_seconds for group in groups),
         auto_closed_amount=sum(group.auto_closed_amount for group in groups),
+        open_count=sum(group.open_count for group in groups),
     )
+
+
+# --------------------------------------------------------------------------
+# Egy órabér-sor törlésének hatása
+# --------------------------------------------------------------------------
+MAX_IMPACT_MONTHS = 36
+
+
+@dataclass
+class ImpactMonth:
+    month: str
+    amount_before: int
+    amount_after: int
+
+    @property
+    def difference(self) -> int:
+        return self.amount_after - self.amount_before
+
+    @property
+    def changes(self) -> bool:
+        return self.amount_before != self.amount_after
+
+
+@dataclass
+class RateDeletionImpact:
+    """Mi változna, ha ez az órabér-sor nem létezne.
+
+    A törlés visszamenőleg átírja a korábbi kimutatásokat -- pontosan az,
+    ami ellen az előzmény-tábla véd. Ezért a felület a megerősítés előtt
+    megmutatja, mely hónapok összege és mennyivel változna.
+    """
+
+    rate: EmployeeRate
+    replacement_rate: int
+    replacement_is_default: bool
+    months: list[ImpactMonth] = field(default_factory=list)
+
+    @property
+    def affected_from_month(self) -> str:
+        return self.rate.valid_from.strftime("%Y.%m")
+
+    @property
+    def changed_months(self) -> list[ImpactMonth]:
+        return [month for month in self.months if month.changes]
+
+    @property
+    def total_difference(self) -> int:
+        return sum(month.difference for month in self.changed_months)
+
+    @property
+    def has_effect(self) -> bool:
+        return bool(self.changed_months)
+
+
+def _month_sequence(first: date, last: date) -> list[str]:
+    months, year, mon = [], first.year, first.month
+    while (year, mon) <= (last.year, last.month) and len(months) < MAX_IMPACT_MONTHS:
+        months.append(f"{year:04d}-{mon:02d}")
+        year, mon = (year + (mon == 12)), (mon % 12) + 1
+    return months
+
+
+def rate_deletion_impact(db: Session, rate: EmployeeRate) -> RateDeletionImpact:
+    """Kiszámolja, mely hónapok kimutatása változna a sor törlésétől."""
+    replacement, is_default = RateResolver(
+        db, [rate.employee_id], exclude_rate_id=rate.id
+    ).resolve(rate.employee_id, rate.valid_from)
+
+    impact = RateDeletionImpact(
+        rate=rate, replacement_rate=replacement, replacement_is_default=is_default
+    )
+    for month in _month_sequence(rate.valid_from, today_local()):
+        before = employee_month(db, rate.employee_id, month).amount
+        after = employee_month(db, rate.employee_id, month, exclude_rate_id=rate.id).amount
+        if before or after:
+            impact.months.append(
+                ImpactMonth(month=month, amount_before=before, amount_after=after)
+            )
+    return impact
