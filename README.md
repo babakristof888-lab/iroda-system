@@ -248,8 +248,17 @@ egy érvényességi kezdődátummal. Egy adott naphoz az a sor tartozik, aminek 
 
 Ezért nem írja át visszamenőleg a régi hónapokat, ha valaki emelést kap: a februári
 kimutatás a februárban érvényes órabérrel számol akkor is, ha márciustól új sor lép
-életbe. Meglévő sort nem lehet szerkeszteni — csak újat felvenni vagy hibásat
-törölni, és mindkettő bekerül az `audit_log` táblába.
+életbe. Meglévő sort nem lehet szerkeszteni — csak újat felvenni vagy hibásat törölni.
+
+**Egy sor törlése viszont visszamenőleg átírja a korábbi kimutatásokat** — pontosan
+az, ami ellen ez a tábla véd. Ezért a törlés külön megerősítő lapot kér, ami megmutatja,
+mely hónapok összege mennyivel változna (`2026-09: 16 000 Ft → 8 000 Ft, −8 000 Ft`),
+és mi lép a törölt sor helyébe. Megerősítés nélküli POST nem töröl, csak visszairányít
+erre a lapra.
+
+Minden bérsor-művelet bekerül az `audit_log` táblába a régi **és** az új értékkel:
+felvételnél az, hogy mit vált fel az új sor, törlésnél az, hogy mi lép a helyébe és
+mely hónapokat érinti.
 
 Ha egy dolgozónak egyáltalán nincs sora, a `HOURLY_RATE` env érték az alapértelmezés.
 A felület ezt „alapértelmezett" jelöléssel mutatja, hogy látszódjon, kinél nincs még
@@ -264,6 +273,17 @@ A másodperceket összegezzük, és **csak a napi sor végén kerekítünk** eg�
 nyers másodperceiből újraszámolt érték — így a felületen látható napi sorok pontosan
 kiadják a havi végösszeget.
 
+A művelet sorrendje is számít: **előbb szorzunk, aztán osztunk**
+(`másodperc × órabér / 3600`). A másodperc/óra hányados szakaszos tizedestört
+(3600 = 2⁴ · 3² · 5²), a `Decimal` pontossága pedig véges — fordított sorrendben egy
+levágott hányadost szoroznánk fel. Így a szorzat egzakt egész marad, és egyetlen
+osztás van a végén. Teszt hasonlítja össze az eredményt egzakt racionális
+aritmetikával (`fractions.Fraction`).
+
+Külön teszt őrzi, hogy a CSV exportban szereplő összeg **soronként és a végösszegben
+is pontosan egyezik** a képernyőn megjelenővel — ez fogná meg, ha valaha visszakerülne
+a kétszeres kerekítés.
+
 ```
 munkamenetek (csak lezártak)
    → napi csoport a kezdés lokális napja szerint
@@ -276,6 +296,13 @@ munkamenetek (csak lezártak)
 Az éjfélen átnyúló műszak ahhoz a naphoz tartozik, amelyiken elkezdődött. A még le
 nem zárt munkamenetek nem számítanak bele semmibe — a jelenléti riport mutatja az
 eddig eltelt időt, a bér nem számol vele.
+
+Ez viszont nem csendben történik: ha az adott hónapban van folyamatban lévő
+munkamenet, a bér-nézetben megjelenik egy halvány sor — *„1 folyamatban lévő
+munkamenet, a bérbe nem számítva"* —, az érintett napi sor pedig „folyamatban"
+jelölést kap. Enélkül az irodavezető délután megnyitná a bérkimutatást, kevesebb órát
+látna, mint a jelenlétiben, és azt hinné, hibás a rendszer. Aki csak folyamatban lévő
+munkamenettel rendelkezik, az is megjelenik az összesítőben, nulla forinttal.
 
 ### Ellenőrzést igénylő tételek
 
