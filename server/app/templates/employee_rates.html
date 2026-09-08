@@ -62,12 +62,6 @@
   </form>
 </div>
 
-{% for rate in rates %}
-  <form id="rate-del-{{ rate.id }}" method="post"
-        action="/employees/{{ employee.id }}/rates/{{ rate.id }}/delete"
-        onsubmit="return confirm('Biztosan törlöd ezt az órabér-sort? A művelet naplózódik.');"></form>
-{% endfor %}
-
 <div class="card p-3 shadow-sm">
   <h5 class="mb-3">Órabér-előzmény</h5>
   <div class="table-responsive">
@@ -88,9 +82,8 @@
           <td class="small text-muted">{{ rate.created_by or "" }}</td>
           <td class="small text-muted text-nowrap">{{ rate.created_at|dt("%Y-%m-%d %H:%M") }}</td>
           <td class="text-end">
-            <button class="btn btn-sm btn-outline-danger" type="submit" form="rate-del-{{ rate.id }}">
-              Töröl
-            </button>
+            <a class="btn btn-sm btn-outline-danger"
+               href="/employees/{{ employee.id }}/rates/{{ rate.id }}/delete">Töröl</a>
           </td>
         </tr>
         {% else %}
@@ -101,8 +94,11 @@
   </div>
   <p class="small text-muted mt-3 mb-0">
     Egy adott naphoz az a sor tartozik, aminek az érvényességi dátuma a legnagyobb
-    az adott napnál nem későbbiek közül. Törölni csak hibás felvitel esetén érdemes –
-    minden felvétel és törlés bekerül az audit naplóba.
+    az adott napnál nem későbbiek közül. Ha az órabér megváltozott, ne írd át a régi
+    sort – vegyél fel újat. Törölni csak elgépelést érdemes: a törlés visszamenőleg
+    módosítja a korábbi kimutatásokat, ezért külön megerősítést kér, és megmutatja,
+    mely hónapok összege mennyivel változna. Minden felvétel és törlés bekerül az
+    audit naplóba a régi és az új értékkel együtt.
   </p>
 </div>
 {% endblock %}

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Órabér törlése{% endblock %}
+
+{% block content %}
+<nav class="mb-3">
+  <a href="/employees/{{ employee.id }}/rates" class="text-decoration-none">← Vissza az órabérekhez</a>
+</nav>
+
+<h3 class="mb-3">Órabér-sor törlése</h3>
+
+<div class="card p-3 shadow-sm mb-4">
+  <div class="row">
+    <div class="col-md-4">
+      <div class="text-muted small">Dolgozó</div>
+      <div class="fw-semibold">{{ employee.name }}</div>
+    </div>
+    <div class="col-md-4">
+      <div class="text-muted small">Törlendő órabér</div>
+      <div class="fw-semibold">{{ rate.hourly_rate|ft }} Ft/óra</div>
+    </div>
+    <div class="col-md-4">
+      <div class="text-muted small">Érvényes ettől</div>
+      <div class="fw-semibold font-monospace">{{ rate.valid_from.isoformat() }}</div>
+    </div>
+  </div>
+  {% if rate.note %}
+  <div class="mt-2 small text-muted">Megjegyzés: {{ rate.note }}</div>
+  {% endif %}
+</div>
+
+<div class="alert alert-warning">
+  <strong>Ez a törlés visszamenőleg módosítja a {{ impact.affected_from_month }} óta készült
+  kimutatásokat.</strong>
+  <div class="mt-2 small">
+    Az órabér-előzmény pont azért külön tábla, hogy a régi hónapok kimutatása ne változzon
+    meg utólag. Egy sor törlése ezt a védelmet töri át. Ha az órabér megváltozott, ne ezt a
+    sort töröld – vegyél fel egy újat az új összeggel és az érvényesség kezdő dátumával.
+    Törölni csak elgépelést érdemes.
+  </div>
+</div>
+
+<div class="card p-3 shadow-sm mb-4">
+  <h6 class="text-muted">Mi lép a helyébe</h6>
+  <p class="mb-0">
+    {{ rate.valid_from.isoformat() }}-tól
+    <strong>{{ impact.replacement_rate|ft }} Ft/óra</strong>
+    {% if impact.replacement_is_default %}
+      <span class="badge bg-secondary">alapértelmezett (<code>HOURLY_RATE</code>)</span>
+    {% else %}
+      <span class="text-muted small">(egy korábbi órabér-sorból)</span>
+    {% endif %}
+  </p>
+</div>
+
+<div class="card p-3 shadow-sm mb-4">
+  <h5 class="mb-3">Az érintett hónapok</h5>
+  {% if impact.months %}
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Hónap</th>
+          <th class="text-end">Jelenlegi összeg</th>
+          <th class="text-end">Törlés után</th>
+          <th class="text-end">Különbség</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for month in impact.months %}
+        <tr {% if month.changes %}class="auto-closed"{% endif %}>
+          <td class="font-monospace">{{ month.month }}</td>
+          <td class="text-end">{{ month.amount_before|ft }} Ft</td>
+          <td class="text-end">{{ month.amount_after|ft }} Ft</td>
+          <td class="text-end fw-semibold">
+            {% if month.changes %}
+              {{ "+" if month.difference > 0 else "" }}{{ month.difference|ft }} Ft
+            {% else %}
+              nem változik
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      {% if impact.has_effect %}
+      <tfoot>
+        <tr class="table-light fw-semibold">
+          <td colspan="3">Összes eltérés</td>
+          <td class="text-end">
+            {{ "+" if impact.total_difference > 0 else "" }}{{ impact.total_difference|ft }} Ft
+          </td>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+  {% else %}
+    <p class="text-muted mb-0">
+      Ehhez az időszakhoz még nincs lezárt munkamenet, tehát a törlés egyetlen
+      kimutatás összegét sem változtatja meg.
+    </p>
+  {% endif %}
+</div>
+
+<form method="post" action="/employees/{{ employee.id }}/rates/{{ rate.id }}/delete">
+  <input type="hidden" name="confirm" value="igen">
+  <div class="d-flex gap-2">
+    <button class="btn btn-danger" type="submit">
+      Értem, törlöm ezt az órabér-sort
+    </button>
+    <a class="btn btn-outline-secondary" href="/employees/{{ employee.id }}/rates">Mégsem</a>
+  </div>
+  <p class="small text-muted mt-2 mb-0">
+    A törlés bekerül az audit naplóba a régi és az új értékkel, valamint az érintett
+    hónapok listájával együtt.
+  </p>
+</form>
+{% endblock %}

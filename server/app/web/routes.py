@@ -697,6 +697,9 @@ def employee_rate_add(
     except ValueError:
         return _back(back, error="Érvénytelen kezdő dátum")
 
+    # Mi volt érvényben eddig ezen a napon? Ez lesz az audit "előtte" értéke.
+    elozo_rate, elozo_default = salary_service.current_rate(db, employee_id, valid_date)
+
     row = salary_service.add_rate(
         db,
         employee_id=employee_id,
@@ -710,6 +713,12 @@ def employee_rate_add(
         "create",
         "employee_rate",
         row.id,
+        before={
+            "employee_id": employee_id,
+            "effective_rate_on": valid_date,
+            "effective_hourly_rate": elozo_rate,
+            "was_default": elozo_default,
+        },
         after={
             "employee_id": employee_id,
             "hourly_rate": rate_value,
@@ -722,30 +731,93 @@ def employee_rate_add(
     return _back(back, message=f"{_ft(rate_value)} Ft/óra érvényes {valid_date.isoformat()}-tól")
 
 
+def _load_rate(db: Session, employee_id: int, rate_id: int) -> EmployeeRate | None:
+    row = db.get(EmployeeRate, rate_id)
+    return row if row is not None and row.employee_id == employee_id else None
+
+
+@router.get("/employees/{employee_id}/rates/{rate_id}/delete", response_class=HTMLResponse)
+def employee_rate_delete_confirm(
+    request: Request,
+    employee_id: int,
+    rate_id: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+    __: None = Depends(require_salary_enabled),
+) -> HTMLResponse:
+    """Megerősítő lap: a törlés visszamenőleg átírja a korábbi kimutatásokat.
+
+    Ez pontosan az, ami ellen az előzmény-tábla véd, ezért nem elég egy
+    JavaScript kérdés – megmutatjuk, mely hónapok összege mennyivel változna.
+    """
+    employee = db.get(Employee, employee_id)
+    row = _load_rate(db, employee_id, rate_id)
+    if employee is None or row is None:
+        raise HTTPException(status_code=404, detail="Nincs ilyen órabér-sor")
+
+    return render(
+        request,
+        "employee_rate_delete.html",
+        {"employee": employee, "rate": row, "impact": salary_service.rate_deletion_impact(db, row)},
+    )
+
+
 @router.post("/employees/{employee_id}/rates/{rate_id}/delete")
 def employee_rate_delete(
     employee_id: int,
     rate_id: int,
+    confirm: str = Form(default=""),
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
     __: None = Depends(require_salary_enabled),
 ) -> RedirectResponse:
     back = f"/employees/{employee_id}/rates"
-    row = db.get(EmployeeRate, rate_id)
-    if row is None or row.employee_id != employee_id:
+    row = _load_rate(db, employee_id, rate_id)
+    if row is None:
         return _back(back, error="Nincs ilyen órabér-sor")
+
+    if confirm != "igen":
+        # Megerősítés nélkül nem törlünk: a művelet visszamenőleg átírja a
+        # korábbi kimutatásokat.
+        return RedirectResponse(
+            f"/employees/{employee_id}/rates/{rate_id}/delete", status_code=303
+        )
+
+    # Az audit "utána" értéke: mi lép a helyébe a törlés után.
+    utana_rate, utana_default = salary_service.RateResolver(
+        db, [employee_id], exclude_rate_id=rate_id
+    ).resolve(employee_id, row.valid_from)
+    erintett = [
+        month.month for month in salary_service.rate_deletion_impact(db, row).changed_months
+    ]
 
     before = {
         "employee_id": row.employee_id,
         "hourly_rate": row.hourly_rate,
         "valid_from": row.valid_from,
         "note": row.note,
+        "created_by": row.created_by,
     }
+    valid_from = row.valid_from
     db.delete(row)
     db.flush()
-    audit.record(db, "delete", "employee_rate", rate_id, before=before, actor=actor)
+    audit.record(
+        db,
+        "delete",
+        "employee_rate",
+        rate_id,
+        before=before,
+        after={
+            "employee_id": employee_id,
+            "effective_rate_on": valid_from,
+            "effective_hourly_rate": utana_rate,
+            "becomes_default": utana_default,
+            "affected_months": erintett,
+        },
+        actor=actor,
+    )
     db.commit()
-    return _back(back, message="Órabér-sor törölve")
+    return _back(back, message=f"Órabér-sor törölve ({valid_from.isoformat()})")
 
 
 # --------------------------------------------------------------------------
