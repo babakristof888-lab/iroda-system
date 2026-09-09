@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Grafikonok{% endblock %}
+
+{% block content %}
+<h3 class="mb-3">Grafikonok</h3>
+
+{# Szűrők egy sorban, a grafikonok fölött. #}
+<div class="card p-3 shadow-sm mb-4">
+  <form method="get" action="/stats" class="row g-2 align-items-end">
+    <div class="col-md-2">
+      <label class="form-label small" for="f-mode">Időszak</label>
+      <select class="form-select" id="f-mode" name="mode" onchange="this.form.submit()">
+        <option value="week" {% if period.mode == 'week' %}selected{% endif %}>Hét</option>
+        <option value="month" {% if period.mode == 'month' %}selected{% endif %}>Hónap</option>
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label small" for="f-anchor">Ezt a napot tartalmazó</label>
+      <input class="form-control" type="date" id="f-anchor" name="anchor" value="{{ anchor }}">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label small" for="f-emp">Dolgozó (napi grafikonhoz)</label>
+      <select class="form-select" id="f-emp" name="employee_id" onchange="this.form.submit()">
+        {% for employee in employees %}
+        <option value="{{ employee.id }}" {% if selected_employee == employee.id %}selected{% endif %}>
+          {{ employee.name }}{% if not employee.active %} (inaktív){% endif %}
+        </option>
+        {% else %}
+        <option value="">– nincs dolgozó –</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-primary w-100" type="submit">Mutasd</button>
+    </div>
+    <div class="col-md-2">
+      <div class="btn-group w-100">
+        <a class="btn btn-outline-secondary"
+           href="/stats?mode={{ period.mode }}&anchor={{ prev_anchor }}&employee_id={{ selected_employee or '' }}"
+           title="előző időszak">‹</a>
+        <a class="btn btn-outline-secondary"
+           href="/stats?mode={{ period.mode }}&anchor={{ next_anchor }}&employee_id={{ selected_employee or '' }}"
+           title="következő időszak">›</a>
+      </div>
+    </div>
+  </form>
+</div>
+
+{# ---------- 1. Napi óraszám egy dolgozóra ---------- #}
+<div class="card p-3 shadow-sm mb-4 viz-root">
+  {% set nev = (employees | selectattr('id', 'equalto', selected_employee) | first) %}
+  <h5 class="mb-1">Napi óraszám{% if nev %} – {{ nev.name }}{% endif %}</h5>
+  <p class="viz-subtitle">
+    {{ period.label }} ·
+    összesen {{ (daily | sum(attribute='seconds')) | hours }}
+  </p>
+
+  {% if selected_employee %}
+    <div class="chart-box chart-box-tall">
+      <canvas id="dailyChart"
+              data-mode="{{ period.mode }}"
+              data-anchor="{{ anchor }}"
+              data-employee="{{ selected_employee }}"></canvas>
+    </div>
+    <div class="viz-key">
+      <span class="viz-key-item"><span class="viz-swatch viz-swatch-normal"></span>ledolgozott óra</span>
+      <span class="viz-key-item"><span class="viz-swatch viz-swatch-check"></span>automatikus zárás – ellenőrzendő</span>
+    </div>
+
+    <details class="mt-3">
+      <summary class="small text-muted">Táblázatos nézet</summary>
+      <div class="table-responsive mt-2">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Nap</th><th class="text-end">Óra</th><th class="text-end">Munkamenet</th><th>Megjegyzés</th></tr></thead>
+          <tbody>
+            {% for bar in daily %}
+            <tr {% if bar.auto_closed %}class="auto-closed"{% endif %}>
+              <td class="text-nowrap font-monospace">
+                {{ bar.local_date.isoformat() }}
+                <span class="text-muted">{{ bar.weekday_short }}</span>
+              </td>
+              <td class="text-end font-monospace">{{ "%.2f"|format(bar.hours) }}</td>
+              <td class="text-end">{{ bar.sessions or "" }}</td>
+              <td class="small text-muted">
+                {% if bar.auto_closed %}automatikus zárás{% endif %}
+                {% if bar.open %}{% if bar.auto_closed %} · {% endif %}folyamatban{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  {% else %}
+    <p class="text-muted mb-0">Vegyél fel dolgozót, hogy legyen mit ábrázolni.</p>
+  {% endif %}
+</div>
+
+{# ---------- 2. Dolgozók összehasonlítása ---------- #}
+<div class="card p-3 shadow-sm viz-root">
+  <h5 class="mb-1">Ki mennyit volt bent</h5>
+  <p class="viz-subtitle">
+    {{ period.label }} · összesen {{ (totals | sum(attribute='seconds')) | hours }}
+  </p>
+
+  {% if totals %}
+    <div class="chart-box" style="height: {{ 60 + totals|length * 38 }}px;">
+      <canvas id="compareChart"
+              data-mode="{{ period.mode }}"
+              data-anchor="{{ anchor }}"></canvas>
+    </div>
+
+    <details class="mt-3">
+      <summary class="small text-muted">Táblázatos nézet</summary>
+      <div class="table-responsive mt-2">
+        <table class="table table-sm mb-0">
+          <thead>
+            <tr>
+              <th>Dolgozó</th><th class="text-end">Óra</th><th class="text-end">Nap</th>
+              <th class="text-end">Napi átlag</th><th class="text-end">Ellenőrzendő nap</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for total in totals %}
+            <tr {% if total.auto_closed_day_count %}class="auto-closed"{% endif %}>
+              <td>{{ total.name }}</td>
+              <td class="text-end font-monospace">{{ "%.2f"|format(total.hours) }}</td>
+              <td class="text-end">{{ total.day_count }}</td>
+              <td class="text-end font-monospace">{{ "%.2f"|format(total.average_hours_per_day) }}</td>
+              <td class="text-end">{{ total.auto_closed_day_count or "" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  {% else %}
+    <p class="text-muted mb-0">Ebben az időszakban nincs adat.</p>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="/static/stats.js"></script>
+{% endblock %}

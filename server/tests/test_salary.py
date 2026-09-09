@@ -201,10 +201,10 @@ def test_nincs_sajat_orabér_a_default_ervenyes():
     with SessionLocal() as db:
         group = salary_service.employee_month(db, employee_id, "2026-09")
 
-    assert group.days[0].hourly_rate == settings.hourly_rate == 1900
+    assert group.days[0].hourly_rate == settings.hourly_rate == 2000
     assert group.days[0].rate_is_default is True
     assert group.uses_default_rate is True
-    assert group.amount == 8 * 1900
+    assert group.amount == 8 * 2000
 
 
 def test_a_valid_from_elotti_napokra_a_default_ervenyes():
@@ -218,7 +218,7 @@ def test_a_valid_from_elotti_napokra_a_default_ervenyes():
     with SessionLocal() as db:
         group = salary_service.employee_month(db, employee_id, "2026-09")
 
-    assert [day.hourly_rate for day in group.days] == [1900, 3000]
+    assert [day.hourly_rate for day in group.days] == [2000, 3000]
     assert [day.rate_is_default for day in group.days] == [True, False]
 
 
@@ -448,7 +448,7 @@ def test_orabér_lap_felvetel_es_torles_naplozva(admin):
         assert entry is not None
         assert '"hourly_rate": 2400' in entry.after_json
         # Az "előtte" azt rögzíti, mit vált fel az új sor.
-        assert '"effective_hourly_rate": 1900' in entry.before_json
+        assert '"effective_hourly_rate": 2000' in entry.before_json
         assert '"was_default": true' in entry.before_json
 
     admin.post(f"/employees/{employee_id}/rates/{rate_id}/delete", data={"confirm": "igen"})
@@ -461,7 +461,7 @@ def test_orabér_lap_felvetel_es_torles_naplozva(admin):
         assert entry is not None
         # Régi ÉS új érték is bekerül: mi volt, és mi lép a helyébe.
         assert '"hourly_rate": 2400' in entry.before_json
-        assert '"effective_hourly_rate": 1900' in entry.after_json
+        assert '"effective_hourly_rate": 2000' in entry.after_json
         assert '"becomes_default": true' in entry.after_json
 
 

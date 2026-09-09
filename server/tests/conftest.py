@@ -26,7 +26,7 @@ os.environ["COOKIE_SECURE"] = "false"
 os.environ["TZ"] = "Europe/Budapest"
 os.environ["DEBOUNCE_SECONDS"] = "60"
 os.environ["AUTO_CLOSE_HOUR"] = "23:59"
-os.environ["HOURLY_RATE"] = "1900"
+os.environ["HOURLY_RATE"] = "2000"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

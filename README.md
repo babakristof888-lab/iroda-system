@@ -63,7 +63,7 @@ külön migrációs lépés. Ha a `/data` nem írható, a log egy érthető magy
 | `HUM_MAX_ALERT` | nem | `65` | Páratartalom felső riasztási küszöb (%). |
 | `ENV_ALERTS_ENABLED` | nem | `true` | `false` esetén nincs környezeti figyelmeztetés a felületen. |
 | `SALARY_ENABLED` | nem | `true` | `false` esetén a bérrel kapcsolatos oszlopok, nézetek és exportok nem jelennek meg, a hozzájuk tartozó útvonalak 404-et adnak. |
-| `HOURLY_RATE` | nem | `1900` | **Alapértelmezett** órabér, Ft/óra. Csak arra a dolgozóra vonatkozik, akinek nincs saját órabér-sora. |
+| `HOURLY_RATE` | nem | `2000` | **Alapértelmezett** órabér, Ft/óra. Csak arra a dolgozóra vonatkozik, akinek nincs saját órabér-sora. |
 | `COOKIE_SECURE` | nem | `true` | Csak lokális http-s fejlesztéshez állítsd `false`-ra. |
 | `SESSION_SECRET` | nem | származtatott | A session cookie aláírókulcsa. Ha nincs megadva, az `ADMIN_PASSWORD_HASH`-ből származik, így egy deploy nem lépteti ki az admint. |
 | `GATEWAY_OFFLINE_MINUTES` | nem | `5` | Ennyi idő után számít offline-nak egy gateway a dashboardon. |
@@ -224,6 +224,7 @@ eltelt időt mutatják, nem a faliórán látszó különbséget.
 | `/reports` | Napi bontás és havi összesítés, szűrés dolgozóra és dátumtartományra; alul a bérszámítás |
 | `/reports/export` | Jelenléti CSV export (UTF-8 BOM, pontosvessző elválasztó) |
 | `/reports/salary/export` | Bér CSV export: dolgozóval napi bontás, nélküle havi összesítő |
+| `/stats` | Grafikonok: egy dolgozó napi óraszáma, és a dolgozók összehasonlítása |
 | `/environment` | Környezeti adatok 24 óra / 7 nap / 30 nap bontásban, grafikon, táblázat, CSV |
 | `/punches` | Nyers eseménynapló, szűrés, kézi javítás, audit napló |
 
@@ -329,6 +330,32 @@ CSV export mindkettőhöz: `/reports/salary/export?month=YYYY-MM[&employee_id=N]
 A jelenléti CSV (`/reports/export`) szándékosan **nem tartalmaz pénzt**: ott a sorok
 munkamenetenkéntiek, és munkamenetenként szorozni óradíjat kerekítési hibát vinne
 bele. A pénz a napi összesítésből számol, azt a bér-export adja.
+
+## Grafikonok
+
+A `/stats` oldal két grafikont ad, mindkettő a **kiválasztott időszakra** (hét vagy
+hónap, a megadott napot tartalmazó):
+
+* **Napi óraszám** egy dolgozóra — oszlopdiagram, az időszak *minden* napjával.
+  A nulla órás napok is szerepelnek, hogy a hétvégék és a hiányzások látszódjanak,
+  ne csak eltűnjenek a tengelyről.
+* **Ki mennyit volt bent** — vízszintes sávok, csökkenő sorrendben, a sáv végén az
+  óraszámmal. Ez mutatja a dolgozókat egymáshoz viszonyítva.
+
+Az időszakot a `‹` `›` gombokkal lehet léptetni. Az adat ugyanabból a
+`collect_sessions` forrásból jön, mint a riportok — a grafikonon látható óraszám
+tehát mindig egyezik a riport óraszámával, erre teszt is van.
+
+**Színek.** Mindkét grafikon egyetlen adatsor (magnitúdó), ezért egyetlen alapszín
+(`#2a78d6`). A második szín (`#ec835a`) nem sorozat, hanem státusz: az automatikusan
+lezárt napokat jelöli. Mivel a kontrasztja fehér kártyán 2,64:1, soha nem áll
+önmagában — jelmagyarázat és a grafikon alatt kinyitható táblázatos nézet is kíséri,
+a tooltip pedig szövegben is kiírja, hogy „automatikus zárás – ellenőrzendő".
+A színek a `style.css`-ben szerepnév szerint vannak definiálva (`--viz-series`,
+`--viz-check`), a JavaScript onnan olvassa őket.
+
+Az adatot a `GET /api/v1/stats/daily` és a `GET /api/v1/stats/employees` végpont adja
+JSON-ként, session cookie-val (a böngésző hívja) vagy API kulccsal.
 
 ## Adatmegőrzés
 
