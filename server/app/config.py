@@ -146,7 +146,7 @@ def load_settings() -> Settings:
         salary_enabled=_env_bool("SALARY_ENABLED", True),
         # Csak alapértelmezés: az a dolgozó számol vele, akinek nincs saját
         # órabér-sora az employee_rates táblában.
-        hourly_rate=_env_int("HOURLY_RATE", 1900),
+        hourly_rate=_env_int("HOURLY_RATE", 2000),
         gateway_offline_minutes=_env_int("GATEWAY_OFFLINE_MINUTES", 5),
     )
 
