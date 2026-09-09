@@ -31,6 +31,7 @@ from ..services import gateways as gateway_service
 from ..services import punches as punch_service
 from ..services import reports as report_service
 from ..services import salary as salary_service
+from ..services import stats as stats_service
 from ..timeutil import (
     fmt_date,
     fmt_dt,
@@ -499,6 +500,49 @@ def reports_export(
         content=payload,
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# --------------------------------------------------------------------------
+# Grafikonok
+# --------------------------------------------------------------------------
+@router.get("/stats", response_class=HTMLResponse)
+def stats_page(
+    request: Request,
+    mode: str = Query(default="month"),
+    anchor: str = Query(default=""),
+    employee_id: str = Query(default=""),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+) -> HTMLResponse:
+    """Két grafikon: egy dolgozó napi óraszáma, és a dolgozók összehasonlítása."""
+    period = stats_service.parse_period(mode, anchor)
+    employees = stats_service.active_employees(db)
+
+    selected: int | None = None
+    if employee_id.strip():
+        try:
+            selected = int(employee_id)
+        except ValueError:
+            selected = None
+    if selected is None or all(employee.id != selected for employee in employees):
+        selected = employees[0].id if employees else None
+
+    return render(
+        request,
+        "stats.html",
+        {
+            "employees": employees,
+            "selected_employee": selected,
+            "period": period,
+            "prev_anchor": period.shifted(-1).anchor.isoformat(),
+            "next_anchor": period.shifted(1).anchor.isoformat(),
+            "anchor": period.anchor.isoformat(),
+            "daily": (
+                stats_service.daily_bars(db, period, selected) if selected is not None else []
+            ),
+            "totals": stats_service.employee_totals(db, period),
+        },
     )
 
 
