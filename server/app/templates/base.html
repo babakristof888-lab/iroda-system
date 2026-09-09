@@ -17,7 +17,8 @@
     <div class="collapse navbar-collapse" id="mainnav">
       <ul class="navbar-nav me-auto">
         {% set nav = [('/', 'Áttekintés'), ('/employees', 'Dolgozók'), ('/cards', 'Kártyák'),
-                      ('/reports', 'Riportok'), ('/environment', 'Környezet'), ('/punches', 'Eseménynapló')] %}
+                      ('/reports', 'Riportok'), ('/stats', 'Grafikonok'),
+                      ('/environment', 'Környezet'), ('/punches', 'Eseménynapló')] %}
         {% for href, label in nav %}
         <li class="nav-item">
           <a class="nav-link {% if request.url.path == href %}active fw-semibold{% endif %}" href="{{ href }}">{{ label }}</a>
