@@ -206,3 +206,44 @@ class EnvSeriesResponse(BaseModel):
     hours: int
     sensor_id: str
     points: list[EnvSeriesPoint] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------
+# Statisztika grafikonok
+# --------------------------------------------------------------------------
+class DailyBarOut(BaseModel):
+    date: str
+    label: str
+    weekday: str
+    hours: float
+    seconds: int
+    sessions: int
+    auto_closed: bool
+    open: bool
+    weekend: bool
+
+
+class DailyStatsResponse(BaseModel):
+    employee_id: int
+    employee_name: str
+    period_label: str
+    total_hours: float
+    bars: list[DailyBarOut] = Field(default_factory=list)
+
+
+class EmployeeTotalOut(BaseModel):
+    employee_id: int
+    name: str
+    employee_code: str
+    hours: float
+    seconds: int
+    days: int
+    average_hours_per_day: float
+    auto_closed_days: int
+    open_count: int
+
+
+class EmployeeStatsResponse(BaseModel):
+    period_label: str
+    total_hours: float
+    employees: list[EmployeeTotalOut] = Field(default_factory=list)
